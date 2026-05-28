@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-import os
+import os 
 import dotenv
 
 import discord
@@ -655,6 +655,157 @@ async def on_message(message: discord.Message):
             pass
 
     await thread.send(content=text, files=files)
+
+
+
+@bot.tree.command(name="kick", description="Kick a member from the server")
+@app_commands.describe(
+    member="Member to kick",
+    reason="Reason for the kick"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def kick(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Optional safety checks
+    if member.id == interaction.user.id:
+        await interaction.response.send_message(
+            "You cannot kick yourself.",
+            ephemeral=True
+        )
+        return
+    if member.id == interaction.client.user.id:
+        await interaction.response.send_message(
+            "I cannot kick myself.",
+            ephemeral=True
+        )
+        return
+
+    # DM with red embed
+    try:
+        embed = discord.Embed(
+            title="You Have Been Kick In Monke Monke Monke League",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="Reason:", value=reason, inline=False)
+        await member.send(embed=embed)
+    except Exception:
+        pass  # can't DM, ignore
+
+    # Kick from guild
+    try:
+        await member.kick(reason=reason)
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to kick {member.mention}: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{member.mention} has been **kicked**.\nReason: {reason}",
+        ephemeral=True
+    )
+
+# /unban command (main server only, admins only)
+
+@bot.tree.command(name="unban", description="Unban a user from the main server")
+@app_commands.describe(
+    user_id="ID of the user to unban (right click -> Copy ID)",
+    reason="Reason for the unban (optional)"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def unban(
+    interaction: discord.Interaction,
+    user_id: str,
+    reason: str = "Manual unban"
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Validate ID
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Please provide a valid user ID.",
+            ephemeral=True
+        )
+        return
+
+    guild = interaction.guild
+
+    # Try to fetch user for DM
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    # Unban
+    try:
+        await guild.unban(discord.Object(id=uid), reason=reason)
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "That user is not currently banned.",
+            ephemeral=True
+        )
+        return
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to unban user: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    # DM the user (if we could fetch them)
+    if user is not None:
+        try:
+            embed = discord.Embed(
+                title="You Have Been Unbanned",
+                description="[our main server](https://discord.gg/monkemonkemonke)",
+                color=discord.Color.green()
+            )
+            await user.send(embed=embed)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(
+        f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}",
+        ephemeral=True
+    )
+
 
 # ---------- on_ready / sync ----------
 
