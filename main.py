@@ -806,6 +806,84 @@ async def unban(
         ephemeral=True
     )
 
+@bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
+@app_commands.describe(
+    user_id="ID of the user to unban (right click -> Copy ID)"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def false_ban(
+    interaction: discord.Interaction,
+    user_id: str
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Validate ID
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Please provide a valid user ID.",
+            ephemeral=True
+        )
+        return
+
+    guild = interaction.guild
+
+    # Try to fetch user for DM
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    # Unban from main guild
+    try:
+        await guild.unban(discord.Object(id=uid), reason="False ban correction")
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "That user is not currently banned.",
+            ephemeral=True
+        )
+        return
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to unban user: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    # DM the user with your message
+    if user is not None:
+        try:
+            msg = (
+                "A False Ban Was Issued! We are very sorry for the inconvenience,\n"
+                "[Mina Sever](https://discord.gg/BHysdT6PJM)\n"
+                "Best regards, MMM Staff Team."
+            )
+            await user.send(msg)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(
+        f"User with ID `{uid}` has been **unbanned** due to a false ban.",
+        ephemeral=True
+    )
+
+
 
 # ---------- on_ready / sync ----------
 
