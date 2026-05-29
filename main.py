@@ -1,514 +1,908 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Tuple, Optional
+import os 
+import dotenv
+
 import discord
+from discord import app_commands
 from discord.ext import commands
-from discord.ui import View, Select, Button
-import os
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ================== CONFIG ==================
-GUILD_IDS = 1338455645896310784       # main guild where commands live
-APPLICATION_CHANNEL_ID = 1509686940512030870  # channel where apps are posted
 
-# Channel where the transactions bot listens for team creation commands
-TRANSACTIONS_CHANNEL_ID = 1506741709445271766  # <--- SET THIS
+# ------------ IDs / CONSTANTS ------------
+MAIN_GUILD_ID = 1338455645896310784   # main server ID
+APPEAL_GUILD_ID = 1497651620681486338 # appeal server ID
+APPEAL_CHANNEL_ID = 1497668613283254312  # appeal review channel ID (in appeal server)
+STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + permissions)
 
-# Role IDs to give on acceptance
-CASTER_ROLE_ID = 1338478126354923530
-REF_ROLE_ID = 1356887381156036688
-COMMENTATOR_ROLE_ID = 1346047919874248748
-HELPER_ROLE_ID = 1505268458135486544  # <--- SET THIS to your helper role ID
-
-# Staff roles (any of these means "staff", and blocks team apps)
-STAFF_ROLE_IDS = [
-    1351639240861028447,  # <--- replace with real staff role IDs
-    1339202997208616990,
-    1353119096211898450,
-    1472041769049784330,
-    1338475990833303677,
-    1374305296326856734,
-]
-
-# App open/closed status (True = open, False = closed)
-APP_STATUS = {
-    "caster": True,
-    "ref": True,
-    "commentator": True,
-    "staff": True,
-    "team": True,
-}
-# ============================================
+MAIN_SERVER_INVITE = "https://discord.gg/E7bHYjdu4J"
+SERVER_NAME = "Monke Monke Monke League"
+APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
 intents = discord.Intents.default()
-intents.messages = True
-intents.dm_messages = True
 intents.guilds = True
-intents.message_content = True
+intents.members = True
+intents.dm_messages = True
+intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- /register UI ----------
+# ---------- Shared helpers ----------
 
-class RegisterSelect(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(RegisterTypeSelect())
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class RegisterTypeSelect(Select):
+EST = ZoneInfo("America/New_York")
+
+def format_time(dt):
+    dt = dt.astimezone(EST)
+    # Windows‑safe format string (no %-m etc.)
+    return dt.strftime("%m/%d/%Y %I:%M %p EST")
+
+def parse_duration(text: str) -> Optional[timedelta]:
+    """
+    Very simple duration parser.
+    Examples: "2h", "2 h", "5d", "5 days", "30m", "30 minutes"
+    """
+    if not text:
+        return None
+    text = text.strip().lower()
+
+    num = ""
+    unit = ""
+    for ch in text:
+        if ch.isdigit():
+            num += ch
+        elif ch.isalpha():
+            unit += ch
+        else:
+            continue
+
+    if not num:
+        return None
+    n = int(num)
+
+    if unit in ("d", "day", "days"):
+        return timedelta(days=n)
+    if unit in ("h", "hr", "hour", "hours"):
+        return timedelta(hours=n)
+    if unit in ("m", "min", "mins", "minute", "minutes"):
+        return timedelta(minutes=n)
+    if unit in ("s", "sec", "secs", "second", "seconds"):
+        return timedelta(seconds=n)
+
+    return None
+
+def format_remaining(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return "Expired"
+
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    days, hours = divmod(hours, 24)
+
+    parts = []
+    if days:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes or not parts:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return " ".join(parts)
+
+async def setup_countdown(message: discord.Message, end_time: datetime):
+    """
+    Edits the DM embed's Duration field every minute until expiration.
+    Used for ban DM.
+    """
+    while True:
+        now = now_utc()
+        remaining = end_time - now
+        if remaining.total_seconds() <= 0:
+            try:
+                embed = message.embeds[0]
+                for i, field in enumerate(embed.fields):
+                    if field.name == "Duration":
+                        embed.set_field_at(i, name="Duration", value="Expired", inline=False)
+                        break
+                await message.edit(embed=embed)
+            except Exception:
+                pass
+            break
+
+        remaining_text = format_remaining(remaining)
+        try:
+            embed = message.embeds[0]
+            for i, field in enumerate(embed.fields):
+                if field.name == "Duration":
+                    embed.set_field_at(i, name="Duration", value=remaining_text, inline=False)
+                    break
+            await message.edit(embed=embed)
+        except Exception:
+            break
+
+        await asyncio.sleep(60)
+
+
+# ============================================================
+#                       /submit-report
+# ============================================================
+
+class SRActionSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Caster", value="caster", description="Apply to be a caster"),
-            discord.SelectOption(label="Referee", value="ref", description="Apply to be a referee"),
-            discord.SelectOption(label="Commentator", value="commentator", description="Apply to be a commentator"),
-            discord.SelectOption(label="Staff", value="staff", description="Apply to be staff"),
-            discord.SelectOption(label="Team", value="team", description="Apply as a team"),
+            discord.SelectOption(label="Ban", value="ban"),
+            discord.SelectOption(label="Warning", value="warning"),
+            discord.SelectOption(label="Mute/Timeout", value="mute"),
         ]
         super().__init__(
-            placeholder="Choose application type",
+            placeholder="Choose an action...",
             min_values=1,
             max_values=1,
             options=options,
-            custom_id="register_select",
+            custom_id="sr_action_select"
         )
 
     async def callback(self, interaction: discord.Interaction):
-        app_type = self.values[0]  # "caster" / "ref" / "commentator" / "staff" / "team"
+        action = self.values[0]
+        view = SRMemberSelectView(action)
+        await interaction.response.edit_message(
+            content=f"Action selected: **{action.capitalize()}**. Now choose a member:",
+            view=view
+        )
 
-        # Block team apps for anyone with any staff role
-        if app_type == "team" and isinstance(interaction.user, discord.Member):
-            user_role_ids = {r.id for r in interaction.user.roles}
-            if any(staff_id in user_role_ids for staff_id in STAFF_ROLE_IDS):
+class SRActionSelectView(discord.ui.View):
+    def __init__(self, timeout: Optional[float] = 120):
+        super().__init__(timeout=timeout)
+        self.add_item(SRActionSelect())
+
+class SRMemberSelect(discord.ui.UserSelect):
+    def __init__(self, action: str):
+        super().__init__(
+            placeholder="Select a member...",
+            min_values=1,
+            max_values=1,
+            custom_id="sr_member_select"
+        )
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        action = self.action
+        # Open appropriate modal
+        if action in ("ban", "mute"):
+            modal = SRDurationReasonModal(action=action, target=member)
+        else:
+            modal = SRReasonOnlyModal(action=action, target=member)
+        await interaction.response.send_modal(modal)
+
+class SRMemberSelectView(discord.ui.View):
+    def __init__(self, action: str, timeout: Optional[float] = 120):
+        super().__init__(timeout=timeout)
+        self.add_item(SRMemberSelect(action))
+
+class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
+    def __init__(self, action: str, target: discord.Member | discord.User):
+        super().__init__(timeout=300)
+        self.action = action
+        self.target = target
+
+        self.duration_input = discord.ui.TextInput(
+            label="Duration (e.g. 2h, 5 days)",
+            placeholder="2h",
+            required=True,
+            max_length=50
+        )
+        self.reason_input = discord.ui.TextInput(
+            label="Reason",
+            style=discord.TextStyle.paragraph,
+            placeholder="Because...",
+            required=True,
+            max_length=400
+        )
+        self.add_item(self.duration_input)
+        self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        duration_text = self.duration_input.value
+        reason = self.reason_input.value
+        delta = parse_duration(duration_text)
+        if delta is None:
+            await interaction.response.send_message(
+                "Could not parse that duration. Use things like `2h`, `5 days`, `30m`.",
+                ephemeral=True
+            )
+            return
+
+        now = now_utc()
+        end_time = now + delta
+
+        if self.action == "ban":
+            # Ban DM
+            embed = discord.Embed(
+                title="You have been banned.",
+                description=f"Appeal: join [this server]({APPEAL_LINK}) and run `/appeal`.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Rule", value="Testing server", inline=False)
+            embed.add_field(name="Duration", value=format_remaining(delta), inline=False)
+            embed.set_footer(text=format_time(now))
+
+            dm_msg = None
+            try:
+                dm_msg = await self.target.send(embed=embed)
+            except Exception:
+                pass
+
+            # Perform the ban
+            guild = interaction.guild
+            try:
+                await guild.ban(self.target, reason=reason, delete_message_days=0)
+            except Exception as e:
                 await interaction.response.send_message(
-                    "You already have a staff role and cannot apply for a team.",
+                    f"Failed to ban user: {e}",
                     ephemeral=True
                 )
                 return
 
-        # check open/closed
-        if not APP_STATUS.get(app_type, True):
-            await interaction.response.send_message("This App has been closed by a admin", ephemeral=True)
-            return
-
-        await interaction.response.send_message("Application Started — check your DMs.", ephemeral=True)
-        await start_application_flow(interaction.user, app_type, interaction)
-
-# ---------- Application flow ----------
-
-async def start_application_flow(user: discord.User, app_type: str, interaction: discord.Interaction):
-    # DM intro
-    try:
-        dm = await user.create_dm()
-        await dm.send(
-            "Application Started\n"
-            "Please answer the questions below, either by selecting menu options or by sending messages to the bot."
-        )
-    except Exception:
-        try:
-            await interaction.followup.send(
-                "I couldn't DM you. Please enable DMs from server members and try again.",
+            await interaction.response.send_message(
+                f"{self.target.mention} has been **banned** for `{duration_text}`.\nReason: {reason}",
                 ephemeral=True
             )
-        except:
-            pass
-        return
 
-    # collect text answer (required)
-    async def collect_text(question: str):
-        await dm.send(question)
+            if dm_msg:
+                bot.loop.create_task(setup_countdown(dm_msg, end_time))
 
-        def check(m: discord.Message):
-            return m.author.id == user.id and isinstance(m.channel, discord.DMChannel)
-
-        try:
-            msg = await bot.wait_for('message', timeout=300.0, check=check)
-        except asyncio.TimeoutError:
-            await dm.send("Timed out. Please re-run /register to start again.")
-            return None
-
-        content = msg.content.strip()
-        if not content:
-            await dm.send("Response cannot be empty. Please re-run /register.")
-            return None
-        return content
-
-    # yes/no via select
-    async def ask_yes_no(question: str):
-        class YesNoView(View):
-            def __init__(self):
-                super().__init__(timeout=300)
-                self.value = None
-
-            @discord.ui.select(
-                placeholder="Select Yes or No",
-                min_values=1, max_values=1,
-                options=[
-                    discord.SelectOption(label="Yes", value="yes"),
-                    discord.SelectOption(label="No", value="no")
-                ]
+        elif self.action == "mute":
+            # Mute DM
+            embed = discord.Embed(
+                title=f"You Have Been Muted In {SERVER_NAME}",
+                color=discord.Color.dark_gray()
             )
-            async def select_callback(self, interaction2: discord.Interaction, select: Select):
-                if interaction2.user.id != user.id:
-                    await interaction2.response.send_message("This is not for you.", ephemeral=True)
-                    return
-                self.value = select.values[0]
-                await interaction2.response.edit_message(
-                    content=f"{question}\nAnswer: {self.value}",
-                    view=None
-                )
-                self.stop()
+            embed.add_field(name="Reason:", value=reason, inline=False)
+            embed.add_field(name="Duration:", value=duration_text, inline=False)
+            embed.set_footer(text=format_time(now))
 
-        view = YesNoView()
-        msg = await dm.send(question, view=view)
-        await view.wait()
-
-        if view.value is None:
-            # view timed out
             try:
-                await msg.edit(content="Timed out. Please re-run /register to start again.", view=None)
-            except discord.HTTPException:
-                pass
-            return None
-
-        return view.value
-
-    answers = {}
-
-    # questions
-    if app_type == "caster":
-        answers["1"] = await collect_text("1/10. What is your Discord username & ID?")
-        if answers["1"] is None: return
-
-        answers["2"] = await ask_yes_no("2/10. Do you have a mic?")
-        if answers["2"] is None: return
-
-        answers["3"] = await collect_text("3/10. Do you have any past experience with casting in Gorilla Tag? If so please explain.")
-        if answers["3"] is None: return
-
-        answers["4"] = await collect_text("4/10. Why do you want to become a Caster for MMM?")
-        if answers["4"] is None: return
-
-        answers["5"] = await collect_text("5/10. What is your Upload & Download Speed? (use https://www.speedtest.net/)")
-        if answers["5"] is None: return
-
-        answers["6"] = await collect_text("6/10. List your PC specifications.")
-        if answers["6"] is None: return
-
-        answers["7"] = await collect_text("7/10. If you have past casting experience, link your YouTube/Twitch/etc.")
-        if answers["7"] is None: return
-
-        answers["8"] = await collect_text("8/10. Are you familiar with OBS?")
-        if answers["8"] is None: return
-
-        answers["9"] = await collect_text(
-            "9/10. Please send a video showing OBS tasks (make Game Capture, add mic, import/export profile, make scene). "
-            "Upload via Drive/MediaFire and send link."
-        )
-        if answers["9"] is None: return
-
-        answers["10"] = await collect_text("10/10. Any questions?")
-        if answers["10"] is None: return
-
-    elif app_type == "ref":
-        answers["1"] = await collect_text("1/11. What is your Discord username & ID?")
-        if answers["1"] is None: return
-
-        answers["2"] = await collect_text("2/11. Name 3 official scrims you have reffed for (include teams and score).")
-        if answers["2"] is None: return
-
-        answers["3"] = await collect_text("3/11. What is the recommended minimum time a ref should give late players?")
-        if answers["3"] is None: return
-
-        answers["4"] = await collect_text("4/11. How long do runners have before taggers can pursue them?")
-        if answers["4"] is None: return
-
-        answers["5"] = await collect_text("5/11. Where do runners go when tagged by the opposing team?")
-        if answers["5"] is None: return
-
-        answers["6"] = await collect_text("6/11. What headsets are allowed in MMM official scrims?")
-        if answers["6"] is None: return
-
-        answers["7"] = await collect_text("7/11. Can teams have different colors than teammates? If not, why?")
-        if answers["7"] is None: return
-
-        answers["8"] = await collect_text("8/11. Do players have team abbreviation in their name while playing? If not, why?")
-        if answers["8"] is None: return
-
-        answers["9"] = await ask_yes_no("9/11. Do you understand that if you don't ref at least 3-5 matches per season you may be removed/demoted?")
-        if answers["9"] is None: return
-
-        answers["10"] = await ask_yes_no("10/11. Do you understand that bias may result in removal and potential server punishment?")
-        if answers["10"] is None: return
-
-        answers["11"] = await ask_yes_no("11/11. Do you understand you must follow Head Referee instructions at all times?")
-        if answers["11"] is None: return
-
-    elif app_type == "commentator":
-        answers["1"] = await collect_text("1/5. What is your Discord username?")
-        if answers["1"] is None: return
-
-        answers["2"] = await collect_text("2/5. Do you know in-game callouts and the league rules? Explain.")
-        if answers["2"] is None: return
-
-        answers["3"] = await collect_text("3/5. Do you have experience commentating? If so, list the discords you worked for.")
-        if answers["3"] is None: return
-
-        answers["4"] = await collect_text("4/5. Why should you be a commentator? Provide thorough reasoning.")
-        if answers["4"] is None: return
-
-        answers["5"] = await collect_text("5/5. If you use a PC, what microphone do you use?")
-        if answers["5"] is None: return
-
-    elif app_type == "staff":
-        answers["1"] = await collect_text("1/4. What is your Username and ID.")
-        if answers["1"] is None: return
-
-        answers["2"] = await collect_text("2/4. What is your age.")
-        if answers["2"] is None: return
-
-        answers["3"] = await collect_text(
-            "3/4. Do you have experience being a moderator for a league? "
-            "If yes, please list the league and when you served."
-        )
-        if answers["3"] is None: return
-
-        answers["4"] = await collect_text("4/4. Why should we accept you.")
-        if answers["4"] is None: return
-
-    elif app_type == "team":
-        answers["1"] = await collect_text("1/5. Team name and abbreviation")
-        if answers["1"] is None: return
-
-        answers["2"] = await collect_text("2/5. Hex color code")
-        if answers["2"] is None: return
-
-        answers["3"] = await collect_text("3/5. Roster")
-        if answers["3"] is None: return
-
-        answers["4"] = await collect_text("4/5. Server (if private do not type)")
-        if answers["4"] is None: return
-
-        answers["5"] = await ask_yes_no("5/5. yk if you are accepted you need to make a ticket and send your pfp")
-        if answers["5"] is None: return
-
-    # Confirmation to user
-    await dm.send("Application submitted.\nYour application has been submitted.")
-
-    # Build embed
-    embed = discord.Embed(
-        title=f"{user.display_name}'s {app_type.capitalize()} Application",
-        description="Application Submitted",
-        color=0x2F3136
-    )
-    embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
-    for qnum, ans in answers.items():
-        embed.add_field(
-            name=f"Q{qnum}",
-            value=ans if len(ans) < 1024 else ans[:1021] + "...",
-            inline=False
-        )
-    embed.set_footer(text=f"User ID: {user.id}")
-
-    # Staff view (with role-assign on accept, and team command for team apps)
-    class StaffDecisionView(View):
-        def __init__(self, target_user_id: int, app_type: str, answers_dict: dict):
-            super().__init__(timeout=None)
-            self.target_user_id = target_user_id
-            self.app_type = app_type
-            self.answers = answers_dict  # store answers so we can use them on accept
-
-        @discord.ui.button(label="Accept", style=discord.ButtonStyle.green, custom_id="app_accept")
-        async def accept(self, interaction2: discord.Interaction, button: Button):
-            staff_member = interaction2.user
-            if not isinstance(staff_member, discord.Member) or not staff_member.guild_permissions.manage_guild:
-                await interaction2.response.send_message("You don't have permission to use this.", ephemeral=True)
-                return
-
-            await interaction2.response.edit_message(
-                content=f"Application accepted by {staff_member.display_name}.",
-                embed=interaction2.message.embeds[0],
-                view=None
-            )
-
-            # DM applicant
-            try:
-                applicant = await bot.fetch_user(self.target_user_id)
-                await applicant.send(f"Your application was accepted by {staff_member.display_name}.")
-            except:
+                await self.target.send(embed=embed)
+            except Exception:
                 pass
 
-            # give role (only for some types)
-            try:
-                guild = interaction2.guild or (await bot.fetch_guild(GUILD_IDS) if isinstance(GUILD_IDS, int) else None)
-                if guild:
-                    role_id = None
-                    if self.app_type == "caster":
-                        role_id = CASTER_ROLE_ID
-                    elif self.app_type in ("ref", "referee"):
-                        role_id = REF_ROLE_ID
-                    elif self.app_type == "commentator":
-                        role_id = COMMENTATOR_ROLE_ID
-                    elif self.app_type == "staff":
-                        role_id = HELPER_ROLE_ID
-                    # team: no automatic role
-
-                    if role_id:
-                        role = guild.get_role(role_id) or await guild.fetch_role(role_id)
-                        if role:
-                            try:
-                                member = await guild.fetch_member(self.target_user_id)
-                                await member.add_roles(role, reason=f"Application accepted by {staff_member}")
-                            except discord.NotFound:
-                                pass
-                            except:
-                                pass
-            except:
-                pass
-
-            # For team apps, send a command to the transactions bot channel
-            if self.app_type == "team":
+            # Apply timeout (if member)
+            if isinstance(self.target, discord.Member):
                 try:
-                    chan = bot.get_channel(TRANSACTIONS_CHANNEL_ID) or await bot.fetch_channel(TRANSACTIONS_CHANNEL_ID)
-                    # You MUST edit this command format to match what your transactions bot expects.
-                    team_name = self.answers.get("1", "Unknown Team")
-                    color = self.answers.get("2", "N/A")
-                    roster = self.answers.get("3", "N/A")
-                    server = self.answers.get("4", "N/A")
-
-                    team_command = f"!createteam \"{team_name}\" {color} | Roster: {roster} | Server: {server}"
-                    await chan.send(team_command)
-                except:
+                    await self.target.edit(timeout=end_time)
+                except Exception:
                     pass
 
-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red, custom_id="app_deny")
-        async def deny(self, interaction2: discord.Interaction, button: Button):
-            staff_member = interaction2.user
-            if not isinstance(staff_member, discord.Member) or not staff_member.guild_permissions.manage_guild:
-                await interaction2.response.send_message("You don't have permission to use this.", ephemeral=True)
-                return
-
-            await interaction2.response.edit_message(
-                content=f"Application denied by {staff_member.display_name}.",
-                embed=interaction2.message.embeds[0],
-                view=None
+            await interaction.response.send_message(
+                f"{self.target.mention} has been **muted** for `{duration_text}`.\nReason: {reason}",
+                ephemeral=True
             )
+
+class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
+    def __init__(self, action: str, target: discord.Member | discord.User):
+        super().__init__(timeout=300)
+        self.action = action
+        self.target = target
+        self.reason_input = discord.ui.TextInput(
+            label="Reason",
+            style=discord.TextStyle.paragraph,
+            placeholder="Because...",
+            required=True,
+            max_length=400
+        )
+        self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        reason = self.reason_input.value
+        now = now_utc()
+
+        if self.action == "warning":
+            embed = discord.Embed(
+                title=f"You have been warned in {SERVER_NAME}",
+                color=discord.Color.yellow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.set_footer(text=format_time(now))
+
             try:
-                applicant = await bot.fetch_user(self.target_user_id)
-                await applicant.send(f"Your application was denied by {staff_member.display_name}.")
-            except:
+                await self.target.send(embed=embed)
+            except Exception:
                 pass
 
-    # send to review channel
-    try:
-        app_channel = bot.get_channel(APPLICATION_CHANNEL_ID) or await bot.fetch_channel(APPLICATION_CHANNEL_ID)
-        view = StaffDecisionView(user.id, app_type, answers)
-        await app_channel.send(embed=embed, view=view)
-        await dm.send("Your application has been sent to staff.")
-    except Exception:
-        await dm.send("Error: application channel not configured or bot lacks permission to post. Contact an admin.")
+            await interaction.response.send_message(
+                f"{self.target.mention} has been **warned**.\nReason: {reason}",
+                ephemeral=True
+            )
+
+
+@bot.tree.command(name="submit-report", description="Submit a moderation report (admins only)")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def submit_report(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You must be an admin to use this command.", ephemeral=True)
         return
 
-# ---------- /manageapps command ----------
+    view = SRActionSelectView()
+    await interaction.response.send_message(
+        "Choose an action for this report:",
+        view=view,
+        ephemeral=True
+    )
+
+
+# ============================================================
+#                           /appeal
+# ============================================================
+
+appeal_history: Dict[int, List[datetime]] = {}
+active_appeals: Dict[int, int] = {}          # user_id -> thread_id
+pending_appeal_queue: List[int] = []         # user ids in queue order
+
+def can_submit_appeal(user_id: int) -> Tuple[bool, Optional[str]]:
+    """
+    - max 1 appeal every 3 months (approx 90 days)
+    - max 6 appeals lifetime (in memory)
+    """
+    history = appeal_history.get(user_id, [])
+    if len(history) >= 6:
+        return False, "You have reached the maximum of 6 appeals and cannot appeal anymore."
+
+    if history:
+        last = max(history)
+        if now_utc() - last < timedelta(days=90):
+            return False, "You may only submit one appeal every 3 months. Please try again later."
+
+    return True, None
+
+class AgreementView(discord.ui.View):
+    def __init__(self, user_id: int, timeout: Optional[float] = 120):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+
+    @discord.ui.button(label="I Agree", style=discord.ButtonStyle.success, custom_id="appeal_agree")
+    async def agree_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This is not your agreement.", ephemeral=True)
+            return
+
+        ok, msg = can_submit_appeal(interaction.user.id)
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        modal = AppealModal()
+        await interaction.response.send_modal(modal)
+
+class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
+    date_reason = discord.ui.TextInput(
+        label="1. DATE of ban and reason",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+    explanation = discord.ui.TextInput(
+        label="2. Explanation of incident",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000,
+    )
+    reason_for_appeal = discord.ui.TextInput(
+        label="3. Reason for appeal / changes since ban",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000,
+    )
+    commitments = discord.ui.TextInput(
+        label="4. Commitments to future behavior",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000,
+    )
+    comments = discord.ui.TextInput(
+        label="5. Any additional comments",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.guild.id != APPEAL_GUILD_ID:
+            await interaction.response.send_message("This command can only be used in the appeal server.", ephemeral=True)
+            return
+
+        user = interaction.user
+        # record
+        history = appeal_history.setdefault(user.id, [])
+        history.append(now_utc())
+
+        # queue
+        if user.id not in pending_appeal_queue:
+            pending_appeal_queue.append(user.id)
+        position = pending_appeal_queue.index(user.id) + 1
+
+        created_at = now_utc()
+
+        embed = discord.Embed(
+            title=f"{user} (@{user.name}) has submitted a ban appeal.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="User", value=f"{user.mention}", inline=False)
+        embed.add_field(name="User ID", value=str(user.id), inline=False)
+        embed.add_field(name="1. DATE of ban and reason", value=str(self.date_reason), inline=False)
+        embed.add_field(name="2. Explanation of incident", value=str(self.explanation), inline=False)
+        embed.add_field(name="3. Reason for appeal / changes since ban", value=str(self.reason_for_appeal), inline=False)
+        embed.add_field(name="4. Commitments to future behavior", value=str(self.commitments), inline=False)
+        embed.add_field(name="5. Any additional comments", value=str(self.comments) if self.comments else "None", inline=False)
+        embed.set_footer(text=format_time(created_at))
+
+        channel = interaction.client.get_channel(APPEAL_CHANNEL_ID)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await interaction.response.send_message("Appeal channel not found or misconfigured.", ephemeral=True)
+            return
+
+        view = StaffDecisionView(target_user_id=user.id)
+        staff_mention = f"<@&{STAFF_ROLE_ID}>" if STAFF_ROLE_ID else ""
+        appeal_msg = await channel.send(content=staff_mention, embed=embed, view=view)
+
+        thread = await appeal_msg.create_thread(
+            name=f"Appeal - {user.name} ({user.id})",
+            auto_archive_duration=1440
+        )
+        active_appeals[user.id] = thread.id
+
+        try:
+            dm_embed = discord.Embed(
+                title="Appeal Started!",
+                description=(
+                    "Your appeal has been started! Any messages you send here will be sent to the appeal team.\n\n"
+                    "Feel free to add any relevant information about your situation."
+                ),
+                color=discord.Color.orange()
+            )
+            await user.send(embed=dm_embed)
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            f"Your appeal has been submitted to the appeal team.\n"
+            f"You are currently **position {position}** in the appeal queue.",
+            ephemeral=True
+        )
+
+class StaffDecisionView(discord.ui.View):
+    def __init__(self, target_user_id: int, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        self.target_user_id = target_user_id
+
+    async def _check_staff(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message("Not in a guild.", ephemeral=True)
+            return False
+        if STAFF_ROLE_ID is None:
+            return True
+        role = interaction.guild.get_role(STAFF_ROLE_ID)
+        if role not in interaction.user.roles:
+            await interaction.response.send_message("You do not have permission to handle appeals.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="appeal_accept")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_staff(interaction):
+            return
+
+        user_id = self.target_user_id
+        client = interaction.client
+
+        # Try to fetch the user object (not just from cache)
+        try:
+            user = await client.fetch_user(user_id)
+        except Exception:
+            user = client.get_user(user_id)
+
+        # DM user with new message text
+        if user is not None:
+            try:
+                msg = (
+                    "You have Been Unbanned join our server here:\n"
+                    "[Main Server](https://discord.gg/monkemonkemonke)"
+                )
+                await user.send(msg)
+            except Exception:
+                pass
+
+        # Unban in main guild – use user ID directly
+        main_guild = client.get_guild(MAIN_GUILD_ID)
+        if main_guild:
+            try:
+                # This works even if the user is not cached
+                await main_guild.unban(discord.Object(id=user_id), reason="Appeal accepted")
+            except discord.NotFound:
+                # Not currently banned – ignore
+                pass
+            except Exception:
+                # You can log this if you want
+                pass
+
+        # Kick from appeal server
+        appeal_guild = client.get_guild(APPEAL_GUILD_ID)
+        if appeal_guild:
+            try:
+                member = appeal_guild.get_member(user_id)
+                if member:
+                    await member.kick(reason="Appeal accepted - removed from appeal server")
+            except Exception:
+                pass
+
+        # Remove from queues
+        if user_id in pending_appeal_queue:
+            pending_appeal_queue.remove(user_id)
+        active_appeals.pop(user_id, None)
+
+        # Disable buttons
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        await interaction.response.edit_message(content="Appeal **ACCEPTED**.", view=self)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, custom_id="appeal_deny")
+    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_staff(interaction):
+            return
+
+        user_id = self.target_user_id
+        user = interaction.client.get_user(user_id)
+        if user is not None:
+            try:
+                await user.send("Your appeal has been Denied")
+            except Exception:
+                pass
+
+        if user_id in pending_appeal_queue:
+            pending_appeal_queue.remove(user_id)
+        active_appeals.pop(user_id, None)
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        await interaction.response.edit_message(content="Appeal **DENIED**.", view=self)
+
+@bot.tree.command(name="appeal", description="Submit a ban appeal")
+@app_commands.guilds(discord.Object(id=APPEAL_GUILD_ID))
+async def appeal(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.guild.id != APPEAL_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the appeal server.", ephemeral=True)
+        return
+
+    ok, msg = can_submit_appeal(interaction.user.id)
+    if not ok:
+        await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    agreement_text = (
+        "**Ban Appeal Agreement**\n"
+        "By submitting this ban appeal, you agree to the following terms:\n\n"
+        "• Only one unban request every 3 months.\n"
+        "• There is a maximum appeal of 6 – if you are not accepted by the 6th appeal, you cannot appeal anymore.\n"
+        "• Honesty is required. Dishonesty = immediate voiding of the appeal.\n"
+        "• Submitting an appeal does not guarantee an unban.\n\n"
+        "Click the button below to proceed."
+    )
+
+    view = AgreementView(user_id=interaction.user.id)
+    await interaction.response.send_message(agreement_text, view=view, ephemeral=True)
+
+# ---------- Relay DM messages to appeal thread ----------
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Let commands still work
+    await bot.process_commands(message)
+
+    if message.author.bot:
+        return
+
+    # Only handle DMs from users with active appeals
+    if message.guild is not None:
+        return
+
+    user_id = message.author.id
+    if user_id not in active_appeals:
+        return
+
+    thread_id = active_appeals[user_id]
+    thread = bot.get_channel(thread_id)
+    if not isinstance(thread, discord.Thread):
+        return
+
+    content = message.content or "[no text]"
+    attachments = message.attachments
+
+    text = f"**Message from {message.author} ({message.author.id}) in DM:**\n{content}"
+
+    files = []
+    for att in attachments:
+        try:
+            files.append(await att.to_file())
+        except Exception:
+            pass
+
+    await thread.send(content=text, files=files)
+
+
+
+@bot.tree.command(name="kick", description="Kick a member from the server")
+@app_commands.describe(
+    member="Member to kick",
+    reason="Reason for the kick"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def kick(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Optional safety checks
+    if member.id == interaction.user.id:
+        await interaction.response.send_message(
+            "You cannot kick yourself.",
+            ephemeral=True
+        )
+        return
+    if member.id == interaction.client.user.id:
+        await interaction.response.send_message(
+            "I cannot kick myself.",
+            ephemeral=True
+        )
+        return
+
+    # DM with red embed
+    try:
+        embed = discord.Embed(
+            title="You Have Been Kick In Monke Monke Monke League",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="Reason:", value=reason, inline=False)
+        await member.send(embed=embed)
+    except Exception:
+        pass  # can't DM, ignore
+
+    # Kick from guild
+    try:
+        await member.kick(reason=reason)
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to kick {member.mention}: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{member.mention} has been **kicked**.\nReason: {reason}",
+        ephemeral=True
+    )
+
+# /unban command (main server only, admins only)
+
+@bot.tree.command(name="unban", description="Unban a user from the main server")
+@app_commands.describe(
+    user_id="ID of the user to unban (right click -> Copy ID)",
+    reason="Reason for the unban (optional)"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def unban(
+    interaction: discord.Interaction,
+    user_id: str,
+    reason: str = "Manual unban"
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Validate ID
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Please provide a valid user ID.",
+            ephemeral=True
+        )
+        return
+
+    guild = interaction.guild
+
+    # Try to fetch user for DM
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    # Unban
+    try:
+        await guild.unban(discord.Object(id=uid), reason=reason)
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "That user is not currently banned.",
+            ephemeral=True
+        )
+        return
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to unban user: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    # DM the user (if we could fetch them)
+    if user is not None:
+        try:
+            embed = discord.Embed(
+                title="You Have Been Unbanned",
+                description="[our main server](https://discord.gg/monkemonkemonke)",
+                color=discord.Color.green()
+            )
+            await user.send(embed=embed)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(
+        f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}",
+        ephemeral=True
+    )
+
+
+# /false-ban command (main server only, admins only)
+
+@bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
+@app_commands.describe(
+    user_id="ID of the user to unban (right click -> Copy ID)"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def false_ban(
+    interaction: discord.Interaction,
+    user_id: str,
+):
+    # Ensure in main server
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    # Validate ID
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Please provide a valid user ID.",
+            ephemeral=True
+        )
+        return
+
+    guild = interaction.guild
+
+    # Try to fetch user for DM
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    # Unban
+    try:
+        await guild.unban(discord.Object(id=uid), reason="False ban correction")
+    except discord.NotFound:
+        await interaction.response.send_message(
+            "That user is not currently banned.",
+            ephemeral=True
+        )
+        return
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to unban user: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    # DM the user
+    if user is not None:
+        try:
+            msg = (
+                "A False Ban Was Issued! We are very sorry for the inconvenience,\n"
+                "[Mina Sever](https://discord.gg/BHysdT6PJM)\n"
+                "Best regards, MMM Staff Team."
+            )
+            await user.send(msg)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(
+        f"User with ID `{uid}` has been **unbanned** due to a false ban.",
+        ephemeral=True
+    )
+
+
+# ---------- on_ready / sync ----------
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    try:
-        tree = bot.tree
+    print(f"Logged in as {bot.user} ({bot.user.id})")
 
-        # determine guild
-        guild_obj = None
-        if isinstance(GUILD_IDS, int):
-            guild_obj = discord.Object(id=GUILD_IDS)
-        elif isinstance(GUILD_IDS, (list, tuple)) and len(GUILD_IDS) > 0:
-            guild_obj = discord.Object(id=GUILD_IDS[0])
+    # Sync main guild commands (for /submit-report, /kick, /unban, /false-ban)
+    main_guild = discord.Object(id=MAIN_GUILD_ID)
+    bot.tree.copy_global_to(guild=main_guild)
+    await bot.tree.sync(guild=main_guild)
 
-        @tree.command(name="register", description="Start an application (Caster / Ref / Commentator / Staff / Team)", guild=guild_obj)
-        async def register_command(interaction: discord.Interaction):
-            view = RegisterSelect()
-            await interaction.response.send_message("Select application type:", view=view, ephemeral=True)
+    # Sync appeal guild commands (for /appeal)
+    appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
+    bot.tree.copy_global_to(guild=appeal_guild)
+    await bot.tree.sync(guild=appeal_guild)
 
-        @tree.command(name="manageapps", description="Open or close application types", guild=guild_obj)
-        async def manageapps_command(interaction: discord.Interaction):
-            if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message("You must be an administrator to use this.", ephemeral=True)
-                return
+    print("Slash commands synced for main and appeal guilds.")
 
-            class ManageSelect(Select):
-                def __init__(self):
-                    options = [
-                        discord.SelectOption(label="Caster", value="caster", description="Manage Caster applications"),
-                        discord.SelectOption(label="Referee", value="ref", description="Manage Referee applications"),
-                        discord.SelectOption(label="Commentator", value="commentator", description="Manage Commentator applications"),
-                        discord.SelectOption(label="Staff", value="staff", description="Manage Staff applications"),
-                        discord.SelectOption(label="Team", value="team", description="Manage Team applications"),
-                    ]
-                    super().__init__(
-                        placeholder="Choose which application to manage",
-                        min_values=1,
-                        max_values=1,
-                        options=options
-                    )
-
-                async def callback(self, select_interaction: discord.Interaction):
-                    if select_interaction.user.id != interaction.user.id:
-                        await select_interaction.response.send_message("This is not for you.", ephemeral=True)
-                        return
-
-                    chosen = self.values[0]
-
-                    class OpenCloseView(View):
-                        def __init__(self, app_type: str):
-                            super().__init__(timeout=60)
-                            self.app_type = app_type
-
-                        @discord.ui.button(label="Open", style=discord.ButtonStyle.green)
-                        async def open_button(self, btn_interaction: discord.Interaction, button: Button):
-                            if not isinstance(btn_interaction.user, discord.Member) or not btn_interaction.user.guild_permissions.administrator:
-                                await btn_interaction.response.send_message("You must be an administrator to use this.", ephemeral=True)
-                                return
-                            APP_STATUS[self.app_type] = True
-                            await btn_interaction.response.edit_message(
-                                content=f"{self.app_type.capitalize()} applications are now **OPEN**.",
-                                view=None
-                            )
-
-                        @discord.ui.button(label="Close", style=discord.ButtonStyle.red)
-                        async def close_button(self, btn_interaction: discord.Interaction, button: Button):
-                            if not isinstance(btn_interaction.user, discord.Member) or not btn_interaction.user.guild_permissions.administrator:
-                                await btn_interaction.response.send_message("You must be an administrator to use this.", ephemeral=True)
-                                return
-                            APP_STATUS[self.app_type] = False
-                            await btn_interaction.response.edit_message(
-                                content=f"{self.app_type.capitalize()} applications are now **CLOSED**.\n"
-                                        f"Users will see: `This App has been closed by a admin`",
-                                view=None
-                            )
-
-                    status = "OPEN" if APP_STATUS.get(chosen, True) else "CLOSED"
-                    oc_view = OpenCloseView(chosen)
-                    await select_interaction.response.edit_message(
-                        content=f"Managing **{chosen.capitalize()}** applications (currently **{status}**).\n"
-                                f"Do you want to open or close it?",
-                        view=oc_view
-                    )
-
-            view = View(timeout=120)
-            view.add_item(ManageSelect())
-            await interaction.response.send_message(
-                "Select which application you want to manage:",
-                view=view,
-                ephemeral=True
-            )
-
-        # sync commands
-        if guild_obj:
-            await tree.sync(guild=guild_obj)
-        else:
-            await tree.sync()
-        print("Slash commands registered.")
-    except Exception as e:
-        print("Failed to register commands:", e)
-
-bot.run(os.getenv("BOT_TOKEN"))
+bot.run(os.getenv("TOKEN"))
