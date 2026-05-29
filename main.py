@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-import os 
+import os
 import dotenv
 
 import discord
@@ -18,6 +18,10 @@ MAIN_GUILD_ID = 1338455645896310784   # main server ID
 APPEAL_GUILD_ID = 1497651620681486338 # appeal server ID
 APPEAL_CHANNEL_ID = 1497668613283254312  # appeal review channel ID (in appeal server)
 STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + permissions)
+
+# ROLES IN MAIN SERVER
+MOD_ROLE_ID = 1339202997208616990       # <<< REPLACE with your Mod role ID
+TRIAL_MOD_ROLE_ID = 1374305296326856734 # <<< REPLACE with your Trial Mod role ID
 
 MAIN_SERVER_INVITE = "https://discord.gg/E7bHYjdu4J"
 SERVER_NAME = "Monke Monke Monke League"
@@ -130,6 +134,42 @@ async def setup_countdown(message: discord.Message, end_time: datetime):
         await asyncio.sleep(60)
 
 
+# ---------- Permission helpers ----------
+
+def is_mod_or_admin(member: discord.Member) -> bool:
+    """
+    Mods and up:
+    - Admins
+    - Members with MOD_ROLE_ID
+    """
+    if member.guild_permissions.administrator:
+        return True
+
+    if MOD_ROLE_ID:
+        role = member.guild.get_role(MOD_ROLE_ID)
+        if role and role in member.roles:
+            return True
+
+    return False
+
+def can_timeout(member: discord.Member) -> bool:
+    """
+    Who can use mute/timeout:
+    - Admins
+    - Mods
+    - Trial Mods
+    """
+    if is_mod_or_admin(member):
+        return True
+
+    if TRIAL_MOD_ROLE_ID:
+        trial_role = member.guild.get_role(TRIAL_MOD_ROLE_ID)
+        if trial_role and trial_role in member.roles:
+            return True
+
+    return False
+
+
 # ============================================================
 #                       /submit-report
 # ============================================================
@@ -213,8 +253,19 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
             await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
             return
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("You must be in the server to use this.", ephemeral=True)
+            return
+
+        # Ban: mods+ only
+        if self.action == "ban" and not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message("You must be a moderator or admin to ban members.", ephemeral=True)
+            return
+
+        # Mute: mods+ OR trial mods
+        if self.action == "mute" and not can_timeout(interaction.user):
+            await interaction.response.send_message("You must be staff (Trial Mod or higher) to mute members.", ephemeral=True)
             return
 
         duration_text = self.duration_input.value
@@ -245,7 +296,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             try:
                 dm_msg = await self.target.send(embed=embed)
             except Exception:
-                pass
+                dm_msg = None
 
             # Perform the ban
             guild = interaction.guild
@@ -311,8 +362,8 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
             await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
             return
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message("You must be a moderator or admin to use this.", ephemeral=True)
             return
 
         reason = self.reason_input.value
@@ -337,14 +388,14 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
             )
 
 
-@bot.tree.command(name="submit-report", description="Submit a moderation report (admins only)")
+@bot.tree.command(name="submit-report", description="Submit a moderation report (mods+ only)")
 @app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
 async def submit_report(interaction: discord.Interaction):
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
         return
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("You must be an admin to use this command.", ephemeral=True)
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True)
         return
 
     view = SRActionSelectView()
@@ -506,7 +557,7 @@ class StaffDecisionView(discord.ui.View):
         if STAFF_ROLE_ID is None:
             return True
         role = interaction.guild.get_role(STAFF_ROLE_ID)
-        if role not in interaction.user.roles:
+        if not isinstance(interaction.user, discord.Member) or role not in interaction.user.roles:
             await interaction.response.send_message("You do not have permission to handle appeals.", ephemeral=True)
             return False
         return True
@@ -540,13 +591,10 @@ class StaffDecisionView(discord.ui.View):
         main_guild = client.get_guild(MAIN_GUILD_ID)
         if main_guild:
             try:
-                # This works even if the user is not cached
                 await main_guild.unban(discord.Object(id=user_id), reason="Appeal accepted")
             except discord.NotFound:
-                # Not currently banned – ignore
                 pass
             except Exception:
-                # You can log this if you want
                 pass
 
         # Kick from appeal server
@@ -677,10 +725,10 @@ async def kick(
         )
         return
 
-    # Admins only
-    if not interaction.user.guild_permissions.administrator:
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
-            "You must be an admin to use this command.",
+            "You must be a moderator or admin to use this command.",
             ephemeral=True
         )
         return
@@ -725,7 +773,7 @@ async def kick(
         ephemeral=True
     )
 
-# /unban command (main server only, admins only)
+# /unban command (main server only, mods+ only)
 
 @bot.tree.command(name="unban", description="Unban a user from the main server")
 @app_commands.describe(
@@ -746,10 +794,10 @@ async def unban(
         )
         return
 
-    # Admins only
-    if not interaction.user.guild_permissions.administrator:
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
-            "You must be an admin to use this command.",
+            "You must be a moderator or admin to use this command.",
             ephemeral=True
         )
         return
@@ -807,7 +855,7 @@ async def unban(
     )
 
 
-# /false-ban command (main server only, admins only)
+# /false-ban command (main server only, mods+ only)
 
 @bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
 @app_commands.describe(
@@ -826,10 +874,10 @@ async def false_ban(
         )
         return
 
-    # Admins only
-    if not interaction.user.guild_permissions.administrator:
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
-            "You must be an admin to use this command.",
+            "You must be a moderator or admin to use this command.",
             ephemeral=True
         )
         return
