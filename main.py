@@ -23,7 +23,7 @@ STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + pe
 MOD_ROLE_ID = 1339202997208616990       # <<< REPLACE with your Mod role ID
 TRIAL_MOD_ROLE_ID = 1374305296326856734 # <<< REPLACE with your Trial Mod role ID
 
-MAIN_SERVER_INVITE = "https://discord.gg/E7bHYjdu4J"
+MAIN_SERVER_INVITE = "https://discord.gg/monkemonkemonke"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
