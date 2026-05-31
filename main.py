@@ -234,8 +234,8 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.target = target
 
         self.duration_input = discord.ui.TextInput(
-            label="Duration (e.g. 2h, 5 days)",
-            placeholder="2h",
+            label="Duration (e.g. 2h, 5 days, 3 month ban, perm ban)",
+            placeholder="2h or 3 month ban or perm ban",
             required=True,
             max_length=50
         )
@@ -270,18 +270,40 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
 
         duration_text = self.duration_input.value
         reason = self.reason_input.value
-        delta = parse_duration(duration_text)
-        if delta is None:
-            await interaction.response.send_message(
-                "Could not parse that duration. Use things like `2h`, `5 days`, `30m`.",
-                ephemeral=True
-            )
-            return
-
         now = now_utc()
-        end_time = now + delta
 
+        # --- CHANGED: handle ban vs mute separately ---
         if self.action == "ban":
+            duration_text = duration_text.strip()
+            lower = duration_text.lower()
+
+            is_perm = False
+            is_three_month = False
+            delta: Optional[timedelta] = None
+            end_time: Optional[datetime] = None
+
+            # Recognize perm bans
+            if any(word in lower for word in ("perm ban", "perma ban", "permanent ban", "permban", "permanent", "perm")):
+                is_perm = True
+                delta = None
+                end_time = None
+            # Recognize 3-month bans
+            elif any(phrase in lower for phrase in ("3 month ban", "3 months ban", "3 month", "3 months", "3mo")):
+                is_three_month = True
+                delta = timedelta(days=90)
+                end_time = now + delta
+            else:
+                # Fallback: use normal duration syntax (2h, 5d, 30m, etc)
+                delta = parse_duration(duration_text)
+                if delta is None:
+                    await interaction.response.send_message(
+                        "Could not parse that duration. Use things like `2h`, `5 days`, `30m`, "
+                        "or `perm ban` / `3 month ban`.",
+                        ephemeral=True
+                    )
+                    return
+                end_time = now + delta
+
             # Ban DM
             embed = discord.Embed(
                 title="You have been banned.",
@@ -289,7 +311,15 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                 color=discord.Color.red()
             )
             embed.add_field(name="Rule", value="Testing server", inline=False)
-            embed.add_field(name="Duration", value=format_remaining(delta), inline=False)
+
+            if is_perm:
+                duration_field_value = "Permanent ban – you cannot appeal this ban."
+            elif is_three_month:
+                duration_field_value = "3 months – you may appeal after 3 months."
+            else:
+                duration_field_value = format_remaining(delta)
+
+            embed.add_field(name="Duration", value=duration_field_value, inline=False)
             embed.set_footer(text=format_time(now))
 
             dm_msg = None
@@ -297,6 +327,16 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                 dm_msg = await self.target.send(embed=embed)
             except Exception:
                 dm_msg = None
+
+            # --- NEW: track ban type for appeals ---
+            user_id = self.target.id
+            if is_perm:
+                permanent_bans.add(user_id)
+                earliest_appeal_time.pop(user_id, None)
+            elif is_three_month:
+                earliest_appeal_time[user_id] = end_time
+            else:
+                earliest_appeal_time.pop(user_id, None)
 
             # Perform the ban
             guild = interaction.guild
@@ -314,11 +354,21 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                 ephemeral=True
             )
 
-            if dm_msg:
+            # Only run countdown for non-perm bans where we have an end_time
+            if dm_msg and end_time is not None:
                 bot.loop.create_task(setup_countdown(dm_msg, end_time))
 
         elif self.action == "mute":
             # Mute DM
+            delta = parse_duration(duration_text)
+            if delta is None:
+                await interaction.response.send_message(
+                    "Could not parse that duration. Use things like `2h`, `5 days`, `30m`.",
+                    ephemeral=True
+                )
+                return
+            end_time = now + delta
+
             embed = discord.Embed(
                 title=f"You Have Been Muted In {SERVER_NAME}",
                 color=discord.Color.dark_gray()
@@ -414,11 +464,32 @@ appeal_history: Dict[int, List[datetime]] = {}
 active_appeals: Dict[int, int] = {}          # user_id -> thread_id
 pending_appeal_queue: List[int] = []         # user ids in queue order
 
+# --- NEW: ban tracking for appeals ---
+permanent_bans: set[int] = set()                     # users who can never appeal
+earliest_appeal_time: Dict[int, datetime] = {}       # user_id -> earliest time they may appeal
+
+
 def can_submit_appeal(user_id: int) -> Tuple[bool, Optional[str]]:
     """
+    - permanent bans: can never appeal
+    - earliest_appeal_time: user must wait until this time
     - max 1 appeal every 3 months (approx 90 days)
     - max 6 appeals lifetime (in memory)
     """
+    # Permanent ban check
+    if user_id in permanent_bans:
+        return False, "You were permanently banned and cannot appeal."
+
+    # Earliest appeal time (3‑month ban or others you set)
+    if user_id in earliest_appeal_time:
+        now = now_utc()
+        unlock = earliest_appeal_time[user_id]
+        if now < unlock:
+            return False, (
+                "You may not appeal yet.\n"
+                f"Earliest appeal time: **{format_time(unlock)}**"
+            )
+
     history = appeal_history.get(user_id, [])
     if len(history) >= 6:
         return False, "You have reached the maximum of 6 appeals and cannot appeal anymore."
@@ -611,6 +682,10 @@ class StaffDecisionView(discord.ui.View):
         if user_id in pending_appeal_queue:
             pending_appeal_queue.remove(user_id)
         active_appeals.pop(user_id, None)
+
+        # If they were perm-banned or had an earliest_appeal_time, clear that
+        permanent_bans.discard(user_id)
+        earliest_appeal_time.pop(user_id, None)
 
         # Disable buttons
         for child in self.children:
@@ -812,6 +887,14 @@ async def unban(
         )
         return
 
+    # Block unbanning permanent bans via command (optional strictness)
+    if uid in permanent_bans:
+        await interaction.response.send_message(
+            "This user has a **permanent ban** and cannot be unbanned via this command.",
+            ephemeral=True
+        )
+        return
+
     guild = interaction.guild
 
     # Try to fetch user for DM
@@ -837,12 +920,16 @@ async def unban(
         )
         return
 
+    # Clear any ban-tracking flags, just in case
+    permanent_bans.discard(uid)
+    earliest_appeal_time.pop(uid, None)
+
     # DM the user (if we could fetch them)
     if user is not None:
         try:
             embed = discord.Embed(
                 title="You Have Been Unbanned",
-                description="[our main server](https://discord.gg/monkemonkemonke)",
+                description="[our main server](https://discord.gg/mmml)",
                 color=discord.Color.green()
             )
             await user.send(embed=embed)
@@ -892,6 +979,14 @@ async def false_ban(
         )
         return
 
+    # Block unbanning permanent bans via command (optional strictness)
+    if uid in permanent_bans:
+        await interaction.response.send_message(
+            "This user has a **permanent ban** and cannot be unbanned via this command.",
+            ephemeral=True
+        )
+        return
+
     guild = interaction.guild
 
     # Try to fetch user for DM
@@ -917,12 +1012,16 @@ async def false_ban(
         )
         return
 
+    # Clear any ban-tracking flags, just in case
+    permanent_bans.discard(uid)
+    earliest_appeal_time.pop(uid, None)
+
     # DM the user
     if user is not None:
         try:
             msg = (
                 "A False Ban Was Issued! We are very sorry for the inconvenience,\n"
-                "[Mina Sever](https://discord.gg/BHysdT6PJM)\n"
+                "[Main Sever](https://discord.gg/mmml)\n"
                 "Best regards, MMM Staff Team."
             )
             await user.send(msg)
