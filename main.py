@@ -310,7 +310,8 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
 
             guild = interaction.guild
             try:
-                await guild.ban(self.target, reason=reason, delete_message_days=0)
+                # Use delete_message_seconds instead of deprecated delete_message_days
+                await guild.ban(self.target, reason=reason, delete_message_seconds=0)
             except Exception as e:
                 await interaction.response.send_message(
                     f"Failed to ban user: {e}",
@@ -530,7 +531,6 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
         )
         embed.add_field(name="User", value=f"{user.mention}", inline=False)
         embed.add_field(name="User ID", value=str(user.id), inline=False)
-        # Use .value to obtain the entered text
         embed.add_field(name="1. DATE of ban and reason", value=self.date_reason.value, inline=False)
         embed.add_field(name="2. Explanation of incident", value=self.explanation.value, inline=False)
         embed.add_field(name="3. Reason for appeal / changes since ban", value=self.reason_for_appeal.value, inline=False)
@@ -597,13 +597,11 @@ class StaffDecisionView(discord.ui.View):
         user_id = self.target_user_id
         client = interaction.client
 
-        # Try to fetch the user object (not just from cache)
         try:
             user = await client.fetch_user(user_id)
         except Exception:
             user = client.get_user(user_id)
 
-        # DM user with new message text
         if user is not None:
             try:
                 msg = (
@@ -614,7 +612,6 @@ class StaffDecisionView(discord.ui.View):
             except Exception:
                 pass
 
-        # Unban in main guild – use user ID directly
         main_guild = client.get_guild(MAIN_GUILD_ID)
         if main_guild:
             try:
@@ -624,7 +621,6 @@ class StaffDecisionView(discord.ui.View):
             except Exception:
                 pass
 
-        # Kick from appeal server
         appeal_guild = client.get_guild(APPEAL_GUILD_ID)
         if appeal_guild:
             try:
@@ -634,16 +630,13 @@ class StaffDecisionView(discord.ui.View):
             except Exception:
                 pass
 
-        # Remove from queues
         if user_id in pending_appeal_queue:
             pending_appeal_queue.remove(user_id)
         active_appeals.pop(user_id, None)
 
-        # If they were perm-banned or had an earliest_appeal_time, clear that
         permanent_bans.discard(user_id)
         earliest_appeal_time.pop(user_id, None)
 
-        # Disable buttons
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
