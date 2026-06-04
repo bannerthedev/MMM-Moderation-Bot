@@ -2,16 +2,14 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 import os
-import dotenv
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
-
 
 # ------------ IDs / CONSTANTS ------------
 MAIN_GUILD_ID = 1338455645896310784   # main server ID
@@ -45,14 +43,9 @@ EST = ZoneInfo("America/New_York")
 
 def format_time(dt):
     dt = dt.astimezone(EST)
-    # Windows‑safe format string (no %-m etc.)
     return dt.strftime("%m/%d/%Y %I:%M %p EST")
 
 def parse_duration(text: str) -> Optional[timedelta]:
-    """
-    Very simple duration parser.
-    Examples: "2h", "2 h", "5d", "5 days", "30m", "30 minutes"
-    """
     if not text:
         return None
     text = text.strip().lower()
@@ -101,10 +94,6 @@ def format_remaining(delta: timedelta) -> str:
     return " ".join(parts)
 
 async def setup_countdown(message: discord.Message, end_time: datetime):
-    """
-    Edits the DM embed's Duration field every minute until expiration.
-    Used for ban DM.
-    """
     while True:
         now = now_utc()
         remaining = end_time - now
@@ -137,11 +126,6 @@ async def setup_countdown(message: discord.Message, end_time: datetime):
 # ---------- Permission helpers ----------
 
 def is_mod_or_admin(member: discord.Member) -> bool:
-    """
-    Mods and up:
-    - Admins
-    - Members with MOD_ROLE_ID
-    """
     if member.guild_permissions.administrator:
         return True
 
@@ -153,12 +137,6 @@ def is_mod_or_admin(member: discord.Member) -> bool:
     return False
 
 def can_timeout(member: discord.Member) -> bool:
-    """
-    Who can use mute/timeout:
-    - Admins
-    - Mods
-    - Trial Mods
-    """
     if is_mod_or_admin(member):
         return True
 
@@ -215,7 +193,6 @@ class SRMemberSelect(discord.ui.UserSelect):
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
         action = self.action
-        # Open appropriate modal
         if action in ("ban", "mute"):
             modal = SRDurationReasonModal(action=action, target=member)
         else:
@@ -233,8 +210,9 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.action = action
         self.target = target
 
+        # Shortened label to satisfy Discord's 1-45 char limit
         self.duration_input = discord.ui.TextInput(
-            label="Duration (e.g. 2h, 5 days, 3 month ban, perm ban)",
+            label="Duration (e.g. 2h, 5 days, perm)",
             placeholder="2h or 3 month ban or perm ban",
             required=True,
             max_length=50
@@ -258,12 +236,10 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             await interaction.response.send_message("You must be in the server to use this.", ephemeral=True)
             return
 
-        # Ban: mods+ only
         if self.action == "ban" and not is_mod_or_admin(interaction.user):
             await interaction.response.send_message("You must be a moderator or admin to ban members.", ephemeral=True)
             return
 
-        # Mute: mods+ OR trial mods
         if self.action == "mute" and not can_timeout(interaction.user):
             await interaction.response.send_message("You must be staff (Trial Mod or higher) to mute members.", ephemeral=True)
             return
@@ -272,7 +248,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         reason = self.reason_input.value
         now = now_utc()
 
-        # --- CHANGED: handle ban vs mute separately ---
         if self.action == "ban":
             duration_text = duration_text.strip()
             lower = duration_text.lower()
@@ -282,18 +257,15 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             delta: Optional[timedelta] = None
             end_time: Optional[datetime] = None
 
-            # Recognize perm bans
             if any(word in lower for word in ("perm ban", "perma ban", "permanent ban", "permban", "permanent", "perm")):
                 is_perm = True
                 delta = None
                 end_time = None
-            # Recognize 3-month bans
             elif any(phrase in lower for phrase in ("3 month ban", "3 months ban", "3 month", "3 months", "3mo")):
                 is_three_month = True
                 delta = timedelta(days=90)
                 end_time = now + delta
             else:
-                # Fallback: use normal duration syntax (2h, 5d, 30m, etc)
                 delta = parse_duration(duration_text)
                 if delta is None:
                     await interaction.response.send_message(
@@ -304,7 +276,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                     return
                 end_time = now + delta
 
-            # Ban DM
             embed = discord.Embed(
                 title="You have been banned.",
                 description=f"Appeal: join [this server]({APPEAL_LINK}) and run `/appeal`.",
@@ -328,7 +299,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             except Exception:
                 dm_msg = None
 
-            # --- NEW: track ban type for appeals ---
             user_id = self.target.id
             if is_perm:
                 permanent_bans.add(user_id)
@@ -338,7 +308,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             else:
                 earliest_appeal_time.pop(user_id, None)
 
-            # Perform the ban
             guild = interaction.guild
             try:
                 await guild.ban(self.target, reason=reason, delete_message_days=0)
@@ -354,12 +323,10 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                 ephemeral=True
             )
 
-            # Only run countdown for non-perm bans where we have an end_time
             if dm_msg and end_time is not None:
                 bot.loop.create_task(setup_countdown(dm_msg, end_time))
 
         elif self.action == "mute":
-            # Mute DM
             delta = parse_duration(duration_text)
             if delta is None:
                 await interaction.response.send_message(
@@ -382,7 +349,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             except Exception:
                 pass
 
-            # Apply timeout (if member)
             if isinstance(self.target, discord.Member):
                 try:
                     await self.target.edit(timeout=end_time)
@@ -464,23 +430,14 @@ appeal_history: Dict[int, List[datetime]] = {}
 active_appeals: Dict[int, int] = {}          # user_id -> thread_id
 pending_appeal_queue: List[int] = []         # user ids in queue order
 
-# --- NEW: ban tracking for appeals ---
 permanent_bans: set[int] = set()                     # users who can never appeal
 earliest_appeal_time: Dict[int, datetime] = {}       # user_id -> earliest time they may appeal
 
 
 def can_submit_appeal(user_id: int) -> Tuple[bool, Optional[str]]:
-    """
-    - permanent bans: can never appeal
-    - earliest_appeal_time: user must wait until this time
-    - max 1 appeal every 3 months (approx 90 days)
-    - max 6 appeals lifetime (in memory)
-    """
-    # Permanent ban check
     if user_id in permanent_bans:
         return False, "You were permanently banned and cannot appeal."
 
-    # Earliest appeal time (3‑month ban or others you set)
     if user_id in earliest_appeal_time:
         now = now_utc()
         unlock = earliest_appeal_time[user_id]
@@ -558,11 +515,9 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
             return
 
         user = interaction.user
-        # record
         history = appeal_history.setdefault(user.id, [])
         history.append(now_utc())
 
-        # queue
         if user.id not in pending_appeal_queue:
             pending_appeal_queue.append(user.id)
         position = pending_appeal_queue.index(user.id) + 1
@@ -575,11 +530,12 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
         )
         embed.add_field(name="User", value=f"{user.mention}", inline=False)
         embed.add_field(name="User ID", value=str(user.id), inline=False)
-        embed.add_field(name="1. DATE of ban and reason", value=str(self.date_reason), inline=False)
-        embed.add_field(name="2. Explanation of incident", value=str(self.explanation), inline=False)
-        embed.add_field(name="3. Reason for appeal / changes since ban", value=str(self.reason_for_appeal), inline=False)
-        embed.add_field(name="4. Commitments to future behavior", value=str(self.commitments), inline=False)
-        embed.add_field(name="5. Any additional comments", value=str(self.comments) if self.comments else "None", inline=False)
+        # Use .value to obtain the entered text
+        embed.add_field(name="1. DATE of ban and reason", value=self.date_reason.value, inline=False)
+        embed.add_field(name="2. Explanation of incident", value=self.explanation.value, inline=False)
+        embed.add_field(name="3. Reason for appeal / changes since ban", value=self.reason_for_appeal.value, inline=False)
+        embed.add_field(name="4. Commitments to future behavior", value=self.commitments.value, inline=False)
+        embed.add_field(name="5. Any additional comments", value=self.comments.value if self.comments.value else "None", inline=False)
         embed.set_footer(text=format_time(created_at))
 
         channel = interaction.client.get_channel(APPEAL_CHANNEL_ID)
@@ -717,6 +673,7 @@ class StaffDecisionView(discord.ui.View):
 
         await interaction.response.edit_message(content="Appeal **DENIED**.", view=self)
 
+
 @bot.tree.command(name="appeal", description="Submit a ban appeal")
 @app_commands.guilds(discord.Object(id=APPEAL_GUILD_ID))
 async def appeal(interaction: discord.Interaction):
@@ -741,6 +698,7 @@ async def appeal(interaction: discord.Interaction):
 
     view = AgreementView(user_id=interaction.user.id)
     await interaction.response.send_message(agreement_text, view=view, ephemeral=True)
+
 
 # ---------- Relay DM messages to appeal thread ----------
 
@@ -778,7 +736,6 @@ async def on_message(message: discord.Message):
             pass
 
     await thread.send(content=text, files=files)
-
 
 
 @bot.tree.command(name="kick", description="Kick a member from the server")
@@ -847,6 +804,7 @@ async def kick(
         f"{member.mention} has been **kicked**.\nReason: {reason}",
         ephemeral=True
     )
+
 
 # /unban command (main server only, mods+ only)
 
@@ -955,18 +913,12 @@ async def false_ban(
 ):
     # Ensure in main server
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-        await interaction.response.send_message(
-            "This command can only be used in the main server.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
         return
 
     # Mods+ only
     if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-        await interaction.response.send_message(
-            "You must be a moderator or admin to use this command.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True)
         return
 
     # Validate ID
@@ -1051,5 +1003,6 @@ async def on_ready():
     await bot.tree.sync(guild=appeal_guild)
 
     print("Slash commands synced for main and appeal guilds.")
+
 
 bot.run(os.getenv("TOKEN"))
