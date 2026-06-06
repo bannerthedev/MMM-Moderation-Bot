@@ -46,9 +46,18 @@ def format_time(dt):
     return dt.strftime("%m/%d/%Y %I:%M %p EST")
 
 def parse_duration(text: str) -> Optional[timedelta]:
+    """
+    Parses durations like:
+      2h, 5 days, 30m, 1 month, 3 months, 1mo, perm
+    Months are treated as 30 days each.
+    """
     if not text:
         return None
     text = text.strip().lower()
+
+    # quick exact checks
+    if text in ("perm", "permanent", "perma", "permban", "perm ban", "permanent ban"):
+        return None
 
     num = ""
     unit = ""
@@ -69,9 +78,13 @@ def parse_duration(text: str) -> Optional[timedelta]:
     if unit in ("h", "hr", "hour", "hours"):
         return timedelta(hours=n)
     if unit in ("m", "min", "mins", "minute", "minutes"):
+        # ambiguous 'm' could be minutes; keep as minutes for existing behavior
         return timedelta(minutes=n)
     if unit in ("s", "sec", "secs", "second", "seconds"):
         return timedelta(seconds=n)
+    # months treated as 30 days each
+    if unit in ("mo", "month", "months"):
+        return timedelta(days=30 * n)
 
     return None
 
@@ -80,8 +93,8 @@ def format_remaining(delta: timedelta) -> str:
     if total_seconds <= 0:
         return "Expired"
 
-    hours, rem = divmod(total_seconds, 3600)
-    minutes, _ = divmod(rem, 60)
+    minutes, sec = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
 
     parts = []
@@ -101,8 +114,8 @@ async def setup_countdown(message: discord.Message, end_time: datetime):
             try:
                 embed = message.embeds[0]
                 for i, field in enumerate(embed.fields):
-                    if field.name == "Duration":
-                        embed.set_field_at(i, name="Duration", value="Expired", inline=False)
+                    if field.name.lower().startswith("duration"):
+                        embed.set_field_at(i, name=embed.fields[i].name, value="Expired", inline=False)
                         break
                 await message.edit(embed=embed)
             except Exception:
@@ -113,8 +126,8 @@ async def setup_countdown(message: discord.Message, end_time: datetime):
         try:
             embed = message.embeds[0]
             for i, field in enumerate(embed.fields):
-                if field.name == "Duration":
-                    embed.set_field_at(i, name="Duration", value=remaining_text, inline=False)
+                if field.name.lower().startswith("duration"):
+                    embed.set_field_at(i, name=embed.fields[i].name, value=remaining_text, inline=False)
                     break
             await message.edit(embed=embed)
         except Exception:
@@ -211,8 +224,8 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.target = target
 
         self.duration_input = discord.ui.TextInput(
-            label="Duration (e.g. 2h, 5 days, perm)",
-            placeholder="2h or 3 month ban or perm ban",
+            label="Duration (e.g. 2h, 5 days, 1 month, perm)",
+            placeholder="2h or 1 month or perm",
             required=True,
             max_length=50
         )
@@ -261,33 +274,24 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             )
             return
 
-        duration_text = self.duration_input.value
+        duration_text = self.duration_input.value.strip()
         reason = self.reason_input.value
         now = now_utc()
 
         if self.action == "ban":
-            duration_text = duration_text.strip()
             lower = duration_text.lower()
 
-            is_perm = False
-            is_three_month = False
+            is_perm = any(word in lower for word in ("perm ban", "perma ban", "permanent ban", "permban", "permanent", "perm"))
+
             delta: Optional[timedelta] = None
             end_time: Optional[datetime] = None
 
-            if any(word in lower for word in ("perm ban", "perma ban", "permanent ban", "permban", "permanent", "perm")):
-                is_perm = True
-                delta = None
-                end_time = None
-            elif any(phrase in lower for phrase in ("3 month ban", "3 months ban", "3 month", "3 months", "3mo")):
-                is_three_month = True
-                delta = timedelta(days=90)
-                end_time = now + delta
-            else:
+            if not is_perm:
                 delta = parse_duration(duration_text)
                 if delta is None:
                     await interaction.followup.send(
-                        "Could not parse that duration. Use things like `2h`, `5 days`, `30m`, "
-                        "or `perm ban` / `3 month ban`.",
+                        "Could not parse that duration. Use things like `2h`, `5 days`, `30m`, `1 month`, "
+                        "or `perm ban`.",
                         ephemeral=True
                     )
                     return
@@ -302,10 +306,8 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
 
             if is_perm:
                 duration_field_value = "Permanent ban – you cannot appeal this ban."
-            elif is_three_month:
-                duration_field_value = "3 months – you may appeal after 3 months."
             else:
-                duration_field_value = format_remaining(delta)
+                duration_field_value = format_remaining(delta) if delta is not None else "Unknown"
 
             embed.add_field(name="Duration", value=duration_field_value, inline=False)
             embed.set_footer(text=format_time(now))
@@ -320,13 +322,13 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             if is_perm:
                 permanent_bans.add(user_id)
                 earliest_appeal_time.pop(user_id, None)
-            elif is_three_month:
-                earliest_appeal_time[user_id] = end_time
             else:
+                # If you want to set earliest appeal times for temporary bans, you can customize here.
                 earliest_appeal_time.pop(user_id, None)
 
             guild = interaction.guild
             try:
+                # Ban the user (this actually performs the ban)
                 await guild.ban(self.target, reason=reason, delete_message_seconds=0)
             except Exception as e:
                 await interaction.followup.send(
@@ -1043,3 +1045,5 @@ async def on_ready():
 
 
 bot.run(os.getenv("TOKEN"))
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="appeal_accept")
+    async def accept_button(self, interaction: discord.Interaction, button:
