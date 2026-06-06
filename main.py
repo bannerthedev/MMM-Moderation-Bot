@@ -210,7 +210,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.action = action
         self.target = target
 
-        # Shortened label to satisfy Discord's 1-45 char limit
         self.duration_input = discord.ui.TextInput(
             label="Duration (e.g. 2h, 5 days, perm)",
             placeholder="2h or 3 month ban or perm ban",
@@ -228,20 +227,38 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.add_item(self.reason_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer to keep interaction alive
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            await interaction.followup.send(
+                "This command can only be used in the main server.",
+                ephemeral=True
+            )
             return
 
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("You must be in the server to use this.", ephemeral=True)
+            await interaction.followup.send(
+                "You must be in the server to use this.",
+                ephemeral=True
+            )
             return
 
         if self.action == "ban" and not is_mod_or_admin(interaction.user):
-            await interaction.response.send_message("You must be a moderator or admin to ban members.", ephemeral=True)
+            await interaction.followup.send(
+                "You must be a moderator or admin to ban members.",
+                ephemeral=True
+            )
             return
 
         if self.action == "mute" and not can_timeout(interaction.user):
-            await interaction.response.send_message("You must be staff (Trial Mod or higher) to mute members.", ephemeral=True)
+            await interaction.followup.send(
+                "You must be staff (Trial Mod or higher) to mute members.",
+                ephemeral=True
+            )
             return
 
         duration_text = self.duration_input.value
@@ -268,7 +285,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             else:
                 delta = parse_duration(duration_text)
                 if delta is None:
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "Could not parse that duration. Use things like `2h`, `5 days`, `30m`, "
                         "or `perm ban` / `3 month ban`.",
                         ephemeral=True
@@ -310,16 +327,15 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
 
             guild = interaction.guild
             try:
-                # Use delete_message_seconds instead of deprecated delete_message_days
                 await guild.ban(self.target, reason=reason, delete_message_seconds=0)
             except Exception as e:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Failed to ban user: {e}",
                     ephemeral=True
                 )
                 return
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"{self.target.mention} has been **banned** for `{duration_text}`.\nReason: {reason}",
                 ephemeral=True
             )
@@ -330,7 +346,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         elif self.action == "mute":
             delta = parse_duration(duration_text)
             if delta is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Could not parse that duration. Use things like `2h`, `5 days`, `30m`.",
                     ephemeral=True
                 )
@@ -356,7 +372,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                 except Exception:
                     pass
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"{self.target.mention} has been **muted** for `{duration_text}`.\nReason: {reason}",
                 ephemeral=True
             )
@@ -376,11 +392,23 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
         self.add_item(self.reason_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer to keep interaction alive
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            await interaction.followup.send(
+                "This command can only be used in the main server.",
+                ephemeral=True
+            )
             return
         if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-            await interaction.response.send_message("You must be a moderator or admin to use this.", ephemeral=True)
+            await interaction.followup.send(
+                "You must be a moderator or admin to use this.",
+                ephemeral=True
+            )
             return
 
         reason = self.reason_input.value
@@ -399,7 +427,7 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
             except Exception:
                 pass
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"{self.target.mention} has been **warned**.\nReason: {reason}",
                 ephemeral=True
             )
@@ -511,8 +539,17 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer to avoid timeout / unknown interaction
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         if interaction.guild is None or interaction.guild.id != APPEAL_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the appeal server.", ephemeral=True)
+            await interaction.followup.send(
+                "This command can only be used in the appeal server.",
+                ephemeral=True
+            )
             return
 
         user = interaction.user
@@ -535,12 +572,19 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
         embed.add_field(name="2. Explanation of incident", value=self.explanation.value, inline=False)
         embed.add_field(name="3. Reason for appeal / changes since ban", value=self.reason_for_appeal.value, inline=False)
         embed.add_field(name="4. Commitments to future behavior", value=self.commitments.value, inline=False)
-        embed.add_field(name="5. Any additional comments", value=self.comments.value if self.comments.value else "None", inline=False)
+        embed.add_field(
+            name="5. Any additional comments",
+            value=self.comments.value if self.comments.value else "None",
+            inline=False
+        )
         embed.set_footer(text=format_time(created_at))
 
         channel = interaction.client.get_channel(APPEAL_CHANNEL_ID)
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            await interaction.response.send_message("Appeal channel not found or misconfigured.", ephemeral=True)
+            await interaction.followup.send(
+                "Appeal channel not found or misconfigured.",
+                ephemeral=True
+            )
             return
 
         view = StaffDecisionView(target_user_id=user.id)
@@ -566,7 +610,7 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
         except Exception:
             pass
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Your appeal has been submitted to the appeal team.\n"
             f"You are currently **position {position}** in the appeal queue.",
             ephemeral=True
