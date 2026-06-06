@@ -1045,5 +1045,3 @@ async def on_ready():
 
 
 bot.run(os.getenv("TOKEN"))
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="appeal_accept")
-    async def accept_button(self, interaction: discord.Interaction, button:
