@@ -21,7 +21,7 @@ STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + pe
 MOD_ROLE_ID = 1339202997208616990       # <<< REPLACE with your Mod role ID
 TRIAL_MOD_ROLE_ID = 1374305296326856734 # <<< REPLACE with your Trial Mod role ID
 
-MAIN_SERVER_INVITE = "https://discord.gg/mmml"
+MAIN_SERVER_INVITE = "https://discord.gg/d8PpF6wSD6"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
@@ -926,7 +926,7 @@ async def unban(
         try:
             embed = discord.Embed(
                 title="You Have Been Unbanned",
-                description="[our main server](https://discord.gg/mmml)",
+                description="[our main server](https://discord.gg/d8PpF6wSD6)",
                 color=discord.Color.green()
             )
             await user.send(embed=embed)
@@ -1012,7 +1012,7 @@ async def false_ban(
         try:
             msg = (
                 "A False Ban Was Issued! We are very sorry for the inconvenience,\n"
-                "[Main Sever](https://discord.gg/mmml)\n"
+                "[Main Sever](https://discord.gg/d8PpF6wSD6)\n"
                 "Best regards, MMM Staff Team."
             )
             await user.send(msg)
