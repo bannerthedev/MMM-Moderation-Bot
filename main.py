@@ -21,6 +21,9 @@ STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + pe
 MOD_ROLE_ID = 1339202997208616990       # <<< REPLACE with your Mod role ID
 TRIAL_MOD_ROLE_ID = 1374305296326856734 # <<< REPLACE with your Trial Mod role ID
 
+# MAIN SERVER LOG CHANNEL (for ban/unban/false-ban logs)
+LOG_CHANNEL_ID = 1408472513108770816     # <<< REPLACE with your log channel ID
+
 MAIN_SERVER_INVITE = "https://discord.gg/d8PpF6wSD6"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
@@ -81,11 +84,9 @@ def parse_duration(text: str) -> Optional[timedelta]:
     if unit in ("h", "hr", "hour", "hours"):
         return timedelta(hours=n)
     if unit in ("m", "min", "mins", "minute", "minutes"):
-        # ambiguous 'm' could be minutes; keep as minutes for existing behavior
         return timedelta(minutes=n)
     if unit in ("s", "sec", "secs", "second", "seconds"):
         return timedelta(seconds=n)
-    # months treated as 30 days each
     if unit in ("mo", "month", "months"):
         return timedelta(days=30 * n)
 
@@ -164,9 +165,7 @@ def can_timeout(member: discord.Member) -> bool:
     return False
 
 
-# ============================================================
-#                           STATE
-# ============================================================
+# ---------- Global state ----------
 
 appeal_history: Dict[int, List[datetime]] = {}
 active_appeals: Dict[int, int] = {}          # user_id -> thread_id
@@ -177,6 +176,21 @@ earliest_appeal_time: Dict[int, datetime] = {}       # user_id -> earliest time 
 
 # user_id -> end_time for temporary bans
 temp_bans: Dict[int, datetime] = {}
+
+# Simple in-memory case counter for unban cases
+case_counter = 1
+
+def get_next_case_id() -> int:
+    global case_counter
+    cid = case_counter
+    case_counter += 1
+    return cid
+
+def get_log_channel() -> Optional[discord.TextChannel]:
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    return None
 
 
 # ============================================================
@@ -342,14 +356,12 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             if is_perm:
                 permanent_bans.add(user_id)
                 earliest_appeal_time.pop(user_id, None)
-                temp_bans.pop(user_id, None)  # permanent, so no temp entry
+                temp_bans.pop(user_id, None)
             else:
-                # If you want to set earliest appeal times for temporary bans, you can customize here.
                 earliest_appeal_time.pop(user_id, None)
 
             guild = interaction.guild
             try:
-                # Ban the user (this actually performs the ban)
                 await guild.ban(self.target, reason=reason, delete_message_seconds=0)
             except Exception as e:
                 await interaction.followup.send(
@@ -357,6 +369,27 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                     ephemeral=True
                 )
                 return
+
+            # Log BAN in main server log channel
+            log_ch = get_log_channel()
+            if log_ch is not None and guild.id == MAIN_GUILD_ID:
+                log_embed = discord.Embed(
+                    title="Ban",
+                    color=discord.Color.red()
+                )
+                offender_text = f"{self.target.id} {getattr(self.target, 'mention', '')}"
+                log_embed.add_field(name="Offender:", value=offender_text, inline=False)
+                log_embed.add_field(name="Reason:", value=reason or "No reason given.", inline=False)
+                log_embed.add_field(
+                    name="Duration:",
+                    value=("Permanent" if is_perm else duration_text),
+                    inline=False
+                )
+                log_embed.set_footer(text=format_time(now))
+                try:
+                    await log_ch.send(embed=log_embed)
+                except Exception:
+                    pass
 
             await interaction.followup.send(
                 f"{self.target.mention} has been **banned** for `{duration_text}`.\nReason: {reason}",
@@ -415,7 +448,6 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
         self.add_item(self.reason_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer to keep interaction alive
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -554,7 +586,6 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer to avoid timeout / unknown interaction
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -696,6 +727,37 @@ class StaffDecisionView(discord.ui.View):
         permanent_bans.discard(user_id)
         earliest_appeal_time.pop(user_id, None)
         temp_bans.pop(user_id, None)
+
+        # Log unban in main server log channel (appeal accepted)
+        log_ch = get_log_channel()
+        if log_ch is not None and main_guild is not None:
+            case_id = get_next_case_id()
+            now = now_utc()
+
+            offender_user = user or client.get_user(user_id)
+            if offender_user is not None:
+                offender_str = f"{user_id} {offender_user.mention}"
+            else:
+                offender_str = str(user_id)
+
+            reason_text = f"Appeal accepted. Use !reason {case_id} <text> to add more detail"
+
+            log_embed = discord.Embed(
+                title=f"unban | case {case_id}",
+                color=discord.Color.green()
+            )
+            log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+            log_embed.add_field(name="Reason:", value=reason_text, inline=False)
+            log_embed.add_field(
+                name="ID:",
+                value=f"{user_id} • {format_time(now)}",
+                inline=False
+            )
+
+            try:
+                await log_ch.send(embed=log_embed)
+            except Exception:
+                pass
 
         for child in self.children:
             if isinstance(child, discord.ui.Button):
@@ -859,8 +921,6 @@ async def kick(
     )
 
 
-# /unban command (main server only, mods+ only)
-
 @bot.tree.command(name="unban", description="Unban a user from the main server")
 @app_commands.describe(
     user_id="ID of the user to unban (right click -> Copy ID)",
@@ -872,7 +932,6 @@ async def unban(
     user_id: str,
     reason: str = "Manual unban"
 ):
-    # Ensure in main server
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message(
             "This command can only be used in the main server.",
@@ -880,7 +939,6 @@ async def unban(
         )
         return
 
-    # Mods+ only
     if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
             "You must be a moderator or admin to use this command.",
@@ -888,7 +946,6 @@ async def unban(
         )
         return
 
-    # Validate ID
     try:
         uid = int(user_id)
     except ValueError:
@@ -898,7 +955,6 @@ async def unban(
         )
         return
 
-    # Block unbanning permanent bans via command (optional strictness)
     if uid in permanent_bans:
         await interaction.response.send_message(
             "This user has a **permanent ban** and cannot be unbanned via this command.",
@@ -908,14 +964,12 @@ async def unban(
 
     guild = interaction.guild
 
-    # Try to fetch user for DM
     user = None
     try:
         user = await interaction.client.fetch_user(uid)
     except Exception:
         user = interaction.client.get_user(uid)
 
-    # Unban
     try:
         await guild.unban(discord.Object(id=uid), reason=reason)
     except discord.NotFound:
@@ -931,12 +985,44 @@ async def unban(
         )
         return
 
-    # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
     temp_bans.pop(uid, None)
 
-    # DM the user (if we could fetch them)
+    # Log UNBAN in main server log channel
+    log_ch = get_log_channel()
+    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+        case_id = get_next_case_id()
+        now = now_utc()
+
+        if not reason or reason.strip() in ("Manual unban",):
+            reason_text = f"No reason given, use !reason {case_id} <text> to add one"
+        else:
+            reason_text = reason
+
+        offender_user = user or interaction.client.get_user(uid)
+        if offender_user is not None:
+            offender_str = f"{uid} {offender_user.mention}"
+        else:
+            offender_str = str(uid)
+
+        log_embed = discord.Embed(
+            title=f"unban | case {case_id}",
+            color=discord.Color.green()
+        )
+        log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+        log_embed.add_field(name="Reason:", value=reason_text, inline=False)
+        log_embed.add_field(
+            name="ID:",
+            value=f"{uid} • {format_time(now)}",
+            inline=False
+        )
+
+        try:
+            await log_ch.send(embed=log_embed)
+        except Exception:
+            pass
+
     if user is not None:
         try:
             embed = discord.Embed(
@@ -954,8 +1040,6 @@ async def unban(
     )
 
 
-# /false-ban command (main server only, mods+ only)
-
 @bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
 @app_commands.describe(
     user_id="ID of the user to unban (right click -> Copy ID)"
@@ -965,17 +1049,14 @@ async def false_ban(
     interaction: discord.Interaction,
     user_id: str,
 ):
-    # Ensure in main server
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
         return
 
-    # Mods+ only
     if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True)
         return
 
-    # Validate ID
     try:
         uid = int(user_id)
     except ValueError:
@@ -985,7 +1066,6 @@ async def false_ban(
         )
         return
 
-    # Block unbanning permanent bans via command (optional strictness)
     if uid in permanent_bans:
         await interaction.response.send_message(
             "This user has a **permanent ban** and cannot be unbanned via this command.",
@@ -995,14 +1075,12 @@ async def false_ban(
 
     guild = interaction.guild
 
-    # Try to fetch user for DM
     user = None
     try:
         user = await interaction.client.fetch_user(uid)
     except Exception:
         user = interaction.client.get_user(uid)
 
-    # Unban
     try:
         await guild.unban(discord.Object(id=uid), reason="False ban correction")
     except discord.NotFound:
@@ -1018,12 +1096,38 @@ async def false_ban(
         )
         return
 
-    # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
     temp_bans.pop(uid, None)
 
-    # DM the user
+    # Log FALSE BAN in main server log channel
+    log_ch = get_log_channel()
+    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+        now = now_utc()
+
+        offender_user = user or interaction.client.get_user(uid)
+        if offender_user is not None:
+            offender_str = f"{uid} {offender_user.mention}"
+        else:
+            offender_str = str(uid)
+
+        log_embed = discord.Embed(
+            title="False ban",
+            color=discord.Color.magenta()
+        )
+        log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+        log_embed.add_field(
+            name="Reason:",
+            value="False ban – staff corrected the ban.",
+            inline=False
+        )
+        log_embed.set_footer(text=format_time(now))
+
+        try:
+            await log_ch.send(embed=log_embed)
+        except Exception:
+            pass
+
     if user is not None:
         try:
             msg = (
@@ -1043,7 +1147,6 @@ async def false_ban(
 
 @tasks.loop(minutes=1)
 async def temp_ban_watcher():
-    """Check all temp bans and unban users whose time has expired."""
     if not temp_bans:
         return
 
@@ -1057,10 +1160,8 @@ async def temp_ban_watcher():
         return
 
     for uid in to_unban:
-        # Remove from tracker first so we don't try repeatedly
         temp_bans.pop(uid, None)
 
-        # Try to DM user
         user = None
         try:
             user = await bot.fetch_user(uid)
@@ -1080,34 +1181,26 @@ async def temp_ban_watcher():
             except Exception:
                 pass
 
-        # Try to unban from the main guild
         try:
             await guild.unban(discord.Object(id=uid), reason="Temporary ban expired")
         except discord.NotFound:
-            # Already unbanned (e.g., via appeal) – ignore
             pass
         except Exception:
-            # Any other error – ignore in loop
             pass
 
-
-# ---------- on_ready / sync ----------
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    # Sync main guild commands (for /submit-report, /kick, /unban, /false-ban)
     main_guild = discord.Object(id=MAIN_GUILD_ID)
     bot.tree.copy_global_to(guild=main_guild)
     await bot.tree.sync(guild=main_guild)
 
-    # Sync appeal guild commands (for /appeal)
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
     bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
 
-    # Start temp-ban watcher
     if not temp_ban_watcher.is_running():
         temp_ban_watcher.start()
 
