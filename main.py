@@ -42,7 +42,7 @@ BAD_WORDS = [
     "hell", "jack ass", "jackass", "motherfucker", "nigga", "pussy", "sisterfuck",
     "niggers", "pee pee", "Pee Pee", "PEE PEE", "penis", "penis", "balls", 
     "cocksucker", "retartd", "retarted", "shi", "dih", "rtrd", "nga", "stfu",
-    "b1tch", "a$$", "freak",
+    "b1tch", "a$$", "freak", "jew",
 ]
 
 intents = discord.Intents.default()
@@ -294,6 +294,17 @@ async def submit_report(interaction: discord.Interaction):
     view = SRActionSelectView()
     await interaction.response.send_message("Choose an action for this report:", view=view, ephemeral=True)
 
+
+
+
+bad_word_offenses: Dict[int, int] = {}
+last_offense_time: Dict[int, datetime] = {}
+MAX_TIMEOUT_DAYS = 30
+BAN_ON_REOFFEND_WITHIN_DAYS = 7
+BAN_DURATION_DAYS = 60
+
+
+
 # ============================================================
 #                       on_message (combined handler)
 # ============================================================
@@ -322,31 +333,113 @@ async def on_message(message: discord.Message):
             pass
         # continue processing (do not return) so we still enforce other checks on the reply
 
-    # -------- AUTO-MOD BAD_WORDS (main server text channels only) ----------
+    # -------- AUTO-MOD BAD_WORDS (escalating timeouts -> ban) ----------
     if message.guild is not None and message.guild.id == MAIN_GUILD_ID and isinstance(message.channel, discord.TextChannel):
-        lower = (message.content or "").lower()
-        if any(bad in lower for bad in BAD_WORDS):
+        content_lower = (message.content or "").lower()
+        if any(bad in content_lower for bad in BAD_WORDS):
+            uid = message.author.id
+            now = now_utc()
+
+            # check recent offense -> ban condition
+            last_time = last_offense_time.get(uid)
+            if last_time is not None and (now - last_time) <= timedelta(days=BAN_ON_REOFFEND_WITHIN_DAYS):
+                # Ban for BAN_DURATION_DAYS
+                try:
+                    # attempt DM before ban
+                    try:
+                        await message.author.send(
+                            f"You have been banned from {SERVER_NAME} for {BAN_DURATION_DAYS} days due to repeated rule violations."
+                        )
+                    except Exception:
+                        pass
+                    await message.guild.ban(message.author, reason="Repeated bad-language offenses - automatic escalation", delete_message_seconds=0)
+                except Exception:
+                    pass
+
+                # Log ban
+                log_ch = get_log_channel()
+                if log_ch is not None:
+                    embed = discord.Embed(title=f"Auto-ban (case)", color=discord.Color.dark_red())
+                    embed.add_field(name="Offender:", value=f"{uid} {getattr(message.author, 'mention', '')}", inline=False)
+                    embed.add_field(name="Reason:", value=f"Repeated bad-language offenses. Banned for {BAN_DURATION_DAYS} days.", inline=False)
+                    embed.add_field(name="Message", value=(message.content or "[no text]")[:1024], inline=False)
+                    embed.set_footer(text=format_time(now))
+                    try:
+                        await log_ch.send(embed=embed)
+                    except Exception:
+                        pass
+
+                # clear tracking
+                bad_word_offenses.pop(uid, None)
+                last_offense_time.pop(uid, None)
+
+                # delete the offending message if still present
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+
+                return
+
+            # Otherwise apply escalating timeout
+            count = bad_word_offenses.get(uid, 0) + 1
+            bad_word_offenses[uid] = count
+            last_offense_time[uid] = now
+
+            days = min(count, MAX_TIMEOUT_DAYS)
+            end_time = now + timedelta(days=days)
+
+            # attempt to timeout the member
+            if isinstance(message.author, discord.Member):
+                try:
+                    await message.author.edit(timeout=end_time)
+                except Exception:
+                    pass
+
+            # DM user about timeout
+            try:
+                embed = discord.Embed(
+                    title=f"You Have Been Muted In {SERVER_NAME}",
+                    description=(
+                        f"You used disallowed language. This is offense #{count}.\n"
+                        f"You have been timed out for {days} day{'s' if days != 1 else ''}.\n\n"
+                        "Please follow the server rules:\n"
+                        f"• {SERVER_RULES_LINK}\n"
+                        f"• {GAME_RULEBOOK_LINK}"
+                    ),
+                    color=discord.Color.orange()
+                )
+                embed.set_footer(text=format_time(now))
+                await message.author.send(embed=embed)
+            except Exception:
+                pass
+
+            # delete offending message
             try:
                 await message.delete()
             except Exception:
-                return
+                pass
+
+            # Log timeout
             log_ch = get_delete_log_channel()
             if log_ch is not None:
                 channel_name = f"#{message.channel.name}"
-                deleted_at = format_time(now_utc())
-                content = message.content or "[no text]"
                 embed = discord.Embed(
-                    description=f"Auto-deleted bad message in {channel_name}",
-                    color=discord.Color.dark_red()
+                    title="Auto-timeout (bad word)",
+                    description=f"Deleted and timed out in {channel_name}",
+                    color=discord.Color.dark_orange()
                 )
-                embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
-                embed.add_field(name="Content", value=content[:1024], inline=False)
-                embed.set_footer(text=f"Deleted at {deleted_at}")
+                embed.add_field(name="Author", value=f"{message.author} ({uid})", inline=False)
+                embed.add_field(name="Offense #", value=str(count), inline=True)
+                embed.add_field(name="Duration", value=f"{days} day{'s' if days != 1 else ''}", inline=True)
+                embed.add_field(name="Message", value=(message.content or "[no text]")[:1024], inline=False)
+                embed.set_footer(text=format_time(now))
                 try:
                     await log_ch.send(embed=embed)
                 except Exception:
                     pass
-            return  # stop further handling for this message
+
+            return
 
     # -------- SUSPICIOUS PROMO/SCAM DETECTION ----------
     try:
@@ -409,6 +502,223 @@ async def on_message(message: discord.Message):
     except Exception:
         pass
 
+
+
+
+purge = app_commands.Group(name="purge", description="Purge messages in a channel")
+
+@purge.command(name="all", description="Delete a number of recent messages in this channel.")
+@app_commands.describe(count="How many recent messages to delete (max 1000 recommended)")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def purge_all(interaction: discord.Interaction, count: int):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True); return
+    if count <= 0:
+        await interaction.response.send_message("Please provide a positive number of messages to delete.", ephemeral=True); return
+
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message("This command can only be used in text channels or threads.", ephemeral=True); return
+
+    await interaction.response.defer(ephemeral=True)
+    messages = []
+    async for msg in channel.history(limit=count):
+        messages.append(msg)
+    if not messages:
+        await interaction.followup.send("No messages found to delete.", ephemeral=True); return
+
+    per_user: Dict[str,int] = {}
+    for msg in messages:
+        name = f"{msg.author} ({msg.author.id})"
+        per_user[name] = per_user.get(name,0) + 1
+
+    try:
+        await channel.delete_messages(messages)
+    except Exception as e:
+        await interaction.followup.send(f"Failed to delete messages: `{e}`", ephemeral=True); return
+
+    total_deleted = len(messages)
+    lines = [f"{total_deleted} messages were removed.", ""]
+    for user_name, amt in sorted(per_user.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"{user_name} – {amt}")
+    summary = "\n".join(lines)
+    await channel.send(summary)
+    await interaction.followup.send("Purge complete.", ephemeral=True)
+
+bot.tree.add_command(purge)
+
+
+
+@bot.tree.command(name="lock-down", description="Lock this channel so only mods+ can talk.")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def lock_down(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True); return
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message("This command can only be used in text channels or threads.", ephemeral=True); return
+    try:
+        await channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to lock this channel: `{e}`", ephemeral=True); return
+    await interaction.response.send_message("This channel has been **locked**. Only staff can talk now.", ephemeral=True)
+
+@bot.command(name="lock")
+@commands.guild_only()
+async def lock_prefix(ctx: commands.Context):
+    if ctx.guild is None or ctx.guild.id != MAIN_GUILD_ID:
+        return
+    if not isinstance(ctx.author, discord.Member) or not is_mod_or_admin(ctx.author):
+        await ctx.reply("You must be a moderator or admin to use this command.", mention_author=False); return
+    channel = ctx.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await ctx.reply("This command can only be used in text channels or threads.", mention_author=False); return
+    try:
+        await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    except Exception as e:
+        await ctx.reply(f"Failed to lock this channel: `{e}`", mention_author=False); return
+    await ctx.reply("This channel has been **locked**. Only staff can talk now.", mention_author=False)
+
+
+
+@bot.tree.command(name="unban", description="Unban a user from the main server")
+@app_commands.describe(user_id="ID of the user to unban (right click -> Copy ID)", reason="Reason for the unban (optional)")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def unban(interaction: discord.Interaction, user_id: str, reason: str = "Manual unban"):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True); return
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message("Please provide a valid user ID.", ephemeral=True); return
+    if uid in permanent_bans:
+        await interaction.response.send_message("This user has a **permanent ban** and cannot be unbanned via this command.", ephemeral=True); return
+
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    try:
+        await interaction.guild.unban(discord.Object(id=uid), reason=reason)
+    except discord.NotFound:
+        await interaction.response.send_message("That user is not currently banned.", ephemeral=True); return
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to unban user: `{e}`", ephemeral=True); return
+
+    permanent_bans.discard(uid)
+    earliest_appeal_time.pop(uid, None)
+    temp_bans.pop(uid, None)
+
+    appeal_guild = interaction.client.get_guild(APPEAL_GUILD_ID)
+    if appeal_guild is not None:
+        try:
+            member = appeal_guild.get_member(uid)
+            if member:
+                await member.kick(reason="Unbanned from main server - removed from appeal server")
+        except Exception:
+            pass
+
+    log_ch = get_log_channel()
+    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+        case_id = get_next_case_id()
+        now = now_utc()
+        reason_text = reason if reason and reason.strip() not in ("Manual unban",) else f"No reason given, use !reason {case_id} <text> to add one"
+        offender_user = user or interaction.client.get_user(uid)
+        offender_str = f"{uid} {offender_user.mention}" if offender_user else str(uid)
+        log_embed = discord.Embed(title=f"unban | case {case_id}", color=discord.Color.green())
+        log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+        log_embed.add_field(name="Reason:", value=reason_text, inline=False)
+        log_embed.add_field(name="ID:", value=f"{uid} • {format_time(now)}", inline=False)
+        try:
+            await log_ch.send(embed=log_embed)
+        except Exception:
+            pass
+
+    if user is not None:
+        try:
+            embed = discord.Embed(title="You Have Been Unbanned", description=f"[our main server]({MAIN_SERVER_INVITE})", color=discord.Color.green())
+            await user.send(embed=embed)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}", ephemeral=True)
+
+
+
+
+
+@bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
+@app_commands.describe(user_id="ID of the user to unban (right click -> Copy ID)")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def false_ban(interaction: discord.Interaction, user_id: str):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True); return
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message("Please provide a valid user ID.", ephemeral=True); return
+    if uid in permanent_bans:
+        await interaction.response.send_message("This user has a **permanent ban** and cannot be unbanned via this command.", ephemeral=True); return
+
+    user = None
+    try:
+        user = await interaction.client.fetch_user(uid)
+    except Exception:
+        user = interaction.client.get_user(uid)
+
+    try:
+        await interaction.guild.unban(discord.Object(id=uid), reason="False ban correction")
+    except discord.NotFound:
+        await interaction.response.send_message("That user is not currently banned.", ephemeral=True); return
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to unban user: `{e}`", ephemeral=True); return
+
+    permanent_bans.discard(uid)
+    earliest_appeal_time.pop(uid, None)
+    temp_bans.pop(uid, None)
+
+    appeal_guild = interaction.client.get_guild(APPEAL_GUILD_ID)
+    if appeal_guild is not None:
+        try:
+            member = appeal_guild.get_member(uid)
+            if member:
+                await member.kick(reason="False ban corrected - removed from appeal server")
+        except Exception:
+            pass
+
+    log_ch = get_log_channel()
+    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+        now = now_utc()
+        offender_user = user or interaction.client.get_user(uid)
+        offender_str = f"{uid} {offender_user.mention}" if offender_user else str(uid)
+        log_embed = discord.Embed(title="False ban", color=discord.Color.magenta())
+        log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+        log_embed.add_field(name="Reason:", value="False ban – staff corrected the ban.", inline=False)
+        log_embed.set_footer(text=format_time(now))
+        try:
+            await log_ch.send(embed=log_embed)
+        except Exception:
+            pass
+
+    if user is not None:
+        try:
+            msg = ("A False Ban Was Issued! We are very sorry for the inconvenience,\n"
+                   f"{MAIN_SERVER_INVITE}\nBest regards, MMM Staff Team.")
+            await user.send(msg)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned** due to a false ban.", ephemeral=True)
 
 
 
