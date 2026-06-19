@@ -22,12 +22,12 @@ MOD_ROLE_ID = 1339202997208616990       # Mod role ID
 TRIAL_MOD_ROLE_ID = 1374305296326856734 # Trial Mod role ID
 
 # MAIN SERVER LOG CHANNEL (for ban/unban/false-ban/kick logs)
-LOG_CHANNEL_ID = 123456789012345678     # <<< REPLACE with your log channel ID
+LOG_CHANNEL_ID = 1408472513108770816     # <<< REPLACE with your log channel ID
 
 # Channel for deleted-message logs (in main server)
-DELETE_LOG_CHANNEL_ID = 123456789012345678  # <<< REPLACE with your channel ID
+DELETE_LOG_CHANNEL_ID = 1408474605844172910  # <<< REPLACE with your channel ID
 
-MAIN_SERVER_INVITE = "https://discord.gg/d8PpF6wSD6"
+MAIN_SERVER_INVITE = "https://discord.gg/mmml"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
