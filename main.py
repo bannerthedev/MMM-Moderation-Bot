@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +25,10 @@ MAIN_SERVER_INVITE = "https://discord.gg/d8PpF6wSD6"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
+# Rule book links
+SERVER_RULES_LINK = "https://docs.google.com/document/d/12T179hGHc_CTRB1PUsrb62WjMGms6kF2IYAJHh9O5m8/edit?usp=drivesdk"
+GAME_RULEBOOK_LINK = "https://docs.google.com/document/d/1207tu3VHGdRXVx7cIv2HkmYVkn4sV6Pkdoz26JAYAms/edit?usp=drivesdk"
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
@@ -37,7 +41,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
 
 EST = ZoneInfo("America/New_York")
 
@@ -159,6 +162,21 @@ def can_timeout(member: discord.Member) -> bool:
             return True
 
     return False
+
+
+# ============================================================
+#                           STATE
+# ============================================================
+
+appeal_history: Dict[int, List[datetime]] = {}
+active_appeals: Dict[int, int] = {}          # user_id -> thread_id
+pending_appeal_queue: List[int] = []         # user ids in queue order
+
+permanent_bans: set[int] = set()                     # users who can never appeal
+earliest_appeal_time: Dict[int, datetime] = {}       # user_id -> earliest time they may appeal
+
+# user_id -> end_time for temporary bans
+temp_bans: Dict[int, datetime] = {}
 
 
 # ============================================================
@@ -296,6 +314,8 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                     )
                     return
                 end_time = now + delta
+                # Track this user as a temporary ban
+                temp_bans[self.target.id] = end_time
 
             embed = discord.Embed(
                 title="You have been banned.",
@@ -322,6 +342,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             if is_perm:
                 permanent_bans.add(user_id)
                 earliest_appeal_time.pop(user_id, None)
+                temp_bans.pop(user_id, None)  # permanent, so no temp entry
             else:
                 # If you want to set earliest appeal times for temporary bans, you can customize here.
                 earliest_appeal_time.pop(user_id, None)
@@ -456,14 +477,6 @@ async def submit_report(interaction: discord.Interaction):
 # ============================================================
 #                           /appeal
 # ============================================================
-
-appeal_history: Dict[int, List[datetime]] = {}
-active_appeals: Dict[int, int] = {}          # user_id -> thread_id
-pending_appeal_queue: List[int] = []         # user ids in queue order
-
-permanent_bans: set[int] = set()                     # users who can never appeal
-earliest_appeal_time: Dict[int, datetime] = {}       # user_id -> earliest time they may appeal
-
 
 def can_submit_appeal(user_id: int) -> Tuple[bool, Optional[str]]:
     if user_id in permanent_bans:
@@ -682,6 +695,7 @@ class StaffDecisionView(discord.ui.View):
 
         permanent_bans.discard(user_id)
         earliest_appeal_time.pop(user_id, None)
+        temp_bans.pop(user_id, None)
 
         for child in self.children:
             if isinstance(child, discord.ui.Button):
@@ -920,6 +934,7 @@ async def unban(
     # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
+    temp_bans.pop(uid, None)
 
     # DM the user (if we could fetch them)
     if user is not None:
@@ -1006,6 +1021,7 @@ async def false_ban(
     # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
+    temp_bans.pop(uid, None)
 
     # DM the user
     if user is not None:
@@ -1025,6 +1041,56 @@ async def false_ban(
     )
 
 
+@tasks.loop(minutes=1)
+async def temp_ban_watcher():
+    """Check all temp bans and unban users whose time has expired."""
+    if not temp_bans:
+        return
+
+    now = now_utc()
+    to_unban = [uid for uid, end in temp_bans.items() if now >= end]
+    if not to_unban:
+        return
+
+    guild = bot.get_guild(MAIN_GUILD_ID)
+    if guild is None:
+        return
+
+    for uid in to_unban:
+        # Remove from tracker first so we don't try repeatedly
+        temp_bans.pop(uid, None)
+
+        # Try to DM user
+        user = None
+        try:
+            user = await bot.fetch_user(uid)
+        except Exception:
+            user = bot.get_user(uid)
+
+        if user is not None:
+            try:
+                msg = (
+                    "Your Time Is Up!\n"
+                    "Your ban time is finally up and now you can go back to enjoying MMM.\n"
+                    "But remember to follow all the rules:\n"
+                    f"• MMM Server Rules: {SERVER_RULES_LINK}\n"
+                    f"• MMM Official Game Rule Book: {GAME_RULEBOOK_LINK}"
+                )
+                await user.send(msg)
+            except Exception:
+                pass
+
+        # Try to unban from the main guild
+        try:
+            await guild.unban(discord.Object(id=uid), reason="Temporary ban expired")
+        except discord.NotFound:
+            # Already unbanned (e.g., via appeal) – ignore
+            pass
+        except Exception:
+            # Any other error – ignore in loop
+            pass
+
+
 # ---------- on_ready / sync ----------
 
 @bot.event
@@ -1040,6 +1106,10 @@ async def on_ready():
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
     bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
+
+    # Start temp-ban watcher
+    if not temp_ban_watcher.is_running():
+        temp_ban_watcher.start()
 
     print("Slash commands synced for main and appeal guilds.")
 
