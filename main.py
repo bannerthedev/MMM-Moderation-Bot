@@ -39,10 +39,9 @@ GAME_RULEBOOK_LINK = "https://docs.google.com/document/d/1207tu3VHGdRXVx7cIv2Hkm
 BAD_WORDS = [
     "fuck", "bitch", "asshole", "bullshit", "bastard", "cock", "dammit", "dick",
     "dick head", "dickhead", "dumb ass", "dumbass", "fucker", "fucking", "goddamnit",
-    "hell", "jack ass", "jackass", "motherfucker", "nigga", "pussy", "sisterfuck",
-    "niggers", "pee pee", "Pee Pee", "PEE PEE", "penis", "penis", "balls", 
-    "cocksucker", "retartd", "retarted", "shi", "dih", "rtrd", "nga", "stfu",
-    "b1tch", "a$$", "freak", "jew",
+    "jack ass", "jackass", "motherfucker", "nigga", "pussy", "sisterfuck",
+    "niggers","penis", "cocksucker", "retartd", "retarted", "rtrd", "nga", 
+    "stfu","b1tch", "a$$", "jew",
 ]
 
 intents = discord.Intents.default()
@@ -217,6 +216,25 @@ def can_timeout(member: discord.Member) -> bool:
             return True
     return False
 
+# ---------- Appeal helper ----------
+APPEAL_COOLDOWN = timedelta(days=90)
+MAX_APPEALS = 6
+
+def can_submit_appeal(user_id: int) -> Tuple[bool, str]:
+    hist = appeal_history.get(user_id, [])
+    if len(hist) >= MAX_APPEALS:
+        return False, "You have reached the maximum number of appeals and cannot appeal anymore."
+    last = hist[-1] if hist else None
+    if last and (now_utc() - last) < APPEAL_COOLDOWN:
+        remaining = APPEAL_COOLDOWN - (now_utc() - last)
+        hours = int(remaining.total_seconds() // 3600)
+        return False, f"You must wait {hours} hour(s) before submitting another appeal."
+    return True, "OK"
+
+def get_log_channel() -> Optional[discord.TextChannel]:
+    ch = bot.get_channel(LOG_CHANNEL_ID)
+    return ch if isinstance(ch, discord.TextChannel) else None
+
 # ---------- Global state ----------
 appeal_history: Dict[int, List[datetime]] = {}
 active_appeals: Dict[int, int] = {}
@@ -233,9 +251,12 @@ def get_next_case_id() -> int:
     case_counter += 1
     return cid
 
-def get_log_channel() -> Optional[discord.TextChannel]:
-    ch = bot.get_channel(LOG_CHANNEL_ID)
-    return ch if isinstance(ch, discord.TextChannel) else None
+# Auto-mod escalation state
+bad_word_offenses: Dict[int, int] = {}
+last_offense_time: Dict[int, datetime] = {}
+MAX_TIMEOUT_DAYS = 30
+BAN_ON_REOFFEND_WITHIN_DAYS = 7
+BAN_DURATION_DAYS = 60
 
 # ============================================================
 #                       /submit-report  (kept unchanged)
@@ -279,7 +300,25 @@ class SRMemberSelectView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.add_item(SRMemberSelect(action))
 
-# (Include SRDurationReasonModal and SRReasonOnlyModal classes you already have)
+# Minimal stubs for SRDurationReasonModal and SRReasonOnlyModal so code runs
+class SRDurationReasonModal(discord.ui.Modal, title="Action (duration + reason)"):
+    duration = discord.ui.TextInput(label="Duration (e.g. 7d)", required=True)
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, required=True)
+    def __init__(self, action: str, target: discord.User):
+        super().__init__()
+        self.action = action
+        self.target = target
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message("Action submitted (stub).", ephemeral=True)
+
+class SRReasonOnlyModal(discord.ui.Modal, title="Action (reason)"):
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, required=True)
+    def __init__(self, action: str, target: discord.User):
+        super().__init__()
+        self.action = action
+        self.target = target
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message("Action submitted (stub).", ephemeral=True)
 
 @bot.tree.command(name="submit-report", description="Submit a moderation report (mods+ only)")
 @app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
@@ -293,16 +332,6 @@ async def submit_report(interaction: discord.Interaction):
 
     view = SRActionSelectView()
     await interaction.response.send_message("Choose an action for this report:", view=view, ephemeral=True)
-
-
-
-
-bad_word_offenses: Dict[int, int] = {}
-last_offense_time: Dict[int, datetime] = {}
-MAX_TIMEOUT_DAYS = 30
-BAN_ON_REOFFEND_WITHIN_DAYS = 7
-BAN_DURATION_DAYS = 60
-
 
 
 # ============================================================
@@ -340,28 +369,34 @@ async def on_message(message: discord.Message):
             uid = message.author.id
             now = now_utc()
 
-            # check recent offense -> ban condition
+            # check recent offense -> escalate to temporary ban-after-timeout condition
             last_time = last_offense_time.get(uid)
             if last_time is not None and (now - last_time) <= timedelta(days=BAN_ON_REOFFEND_WITHIN_DAYS):
-                # Ban for BAN_DURATION_DAYS
-                try:
-                    # attempt DM before ban
+                # Instead of immediate permanent ban, apply a strict timeout of BAN_DURATION_DAYS
+                end_time = now + timedelta(days=BAN_DURATION_DAYS)
+                # Try to timeout member first
+                if isinstance(message.author, discord.Member):
                     try:
-                        await message.author.send(
-                            f"You have been banned from {SERVER_NAME} for {BAN_DURATION_DAYS} days due to repeated rule violations."
-                        )
+                        await message.author.edit(timeout=end_time)
                     except Exception:
                         pass
-                    await message.guild.ban(message.author, reason="Repeated bad-language offenses - automatic escalation", delete_message_seconds=0)
+                # Mark as temp ban to be enforced (bot will ban when timeout expires)
+                temp_bans[uid] = end_time
+
+                # notify user via DM that they will be banned after the timeout ends
+                try:
+                    await message.author.send(
+                        f"You have been timed out in {SERVER_NAME} and will be banned after the timeout expires due to repeated rule violations."
+                    )
                 except Exception:
                     pass
 
-                # Log ban
+                # Log scheduled ban
                 log_ch = get_log_channel()
                 if log_ch is not None:
-                    embed = discord.Embed(title=f"Auto-ban (case)", color=discord.Color.dark_red())
+                    embed = discord.Embed(title=f"Auto-schedule ban (case)", color=discord.Color.dark_red())
                     embed.add_field(name="Offender:", value=f"{uid} {getattr(message.author, 'mention', '')}", inline=False)
-                    embed.add_field(name="Reason:", value=f"Repeated bad-language offenses. Banned for {BAN_DURATION_DAYS} days.", inline=False)
+                    embed.add_field(name="Reason:", value=f"Repeated bad-language offenses. Timed out and scheduled ban for {BAN_DURATION_DAYS} days.", inline=False)
                     embed.add_field(name="Message", value=(message.content or "[no text]")[:1024], inline=False)
                     embed.set_footer(text=format_time(now))
                     try:
@@ -369,11 +404,11 @@ async def on_message(message: discord.Message):
                     except Exception:
                         pass
 
-                # clear tracking
+                # clear offense counters
                 bad_word_offenses.pop(uid, None)
                 last_offense_time.pop(uid, None)
 
-                # delete the offending message if still present
+                # delete offending message if still present
                 try:
                     await message.delete()
                 except Exception:
@@ -502,7 +537,33 @@ async def on_message(message: discord.Message):
     except Exception:
         pass
 
+    # -------- Relay DM messages to appeal thread ----------
+    if message.guild is None:
+        user_id = message.author.id
+        if user_id not in active_appeals:
+            return
 
+        thread_id = active_appeals.get(user_id)
+        thread = bot.get_channel(thread_id)
+        if not isinstance(thread, discord.Thread):
+            return
+
+        content = message.content or "[no text]"
+        attachments = message.attachments
+
+        text = f"**Message from {message.author} ({message.author.id}) in DM:**\n{content}"
+
+        files = []
+        for att in attachments:
+            try:
+                files.append(await att.to_file())
+            except Exception:
+                pass
+
+        try:
+            await thread.send(content=text, files=files)
+        except Exception:
+            pass
 
 
 # create the group (no guild arg)
@@ -599,7 +660,6 @@ async def lock_prefix(ctx: commands.Context):
     await ctx.reply("This channel has been **locked**. Only staff can talk now.", mention_author=False)
 
 
-
 @bot.tree.command(name="unban", description="Unban a user from the main server")
 @app_commands.describe(user_id="ID of the user to unban (right click -> Copy ID)", reason="Reason for the unban (optional)")
 @app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
@@ -665,9 +725,6 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "M
             pass
 
     await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}", ephemeral=True)
-
-
-
 
 
 @bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
@@ -736,7 +793,6 @@ async def false_ban(interaction: discord.Interaction, user_id: str):
     await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned** due to a false ban.", ephemeral=True)
 
 
-
 class AgreementView(discord.ui.View):
     def __init__(self, user_id: int, timeout: Optional[float] = 120):
         super().__init__(timeout=timeout)
@@ -755,6 +811,13 @@ class AgreementView(discord.ui.View):
 
         modal = AppealModal()
         await interaction.response.send_modal(modal)
+
+
+class StaffDecisionView(discord.ui.View):
+    # Placeholder so your AppealModal can instantiate it; implement your real buttons here
+    def __init__(self, target_user_id: int, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        self.target_user_id = target_user_id
 
 
 class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
@@ -844,7 +907,10 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
         except Exception:
             pass
 
-        await interaction.followup.send(f"Your appeal has been submitted to the appeal team.\nYou are currently **position {position}** in the appeal queue.", ephemeral=True)
+        await interaction.followup.send(
+            f"Your appeal has been submitted to the appeal team.\nYou are currently **position {position}** in the appeal queue.",
+            ephemeral=True
+        )
 
 
 @bot.tree.command(name="appeal", description="Submit a ban appeal")
@@ -872,37 +938,6 @@ async def appeal(interaction: discord.Interaction):
     view = AgreementView(user_id=interaction.user.id)
     await interaction.response.send_message(agreement_text, view=view, ephemeral=True)
 
-
-    
-    # -------- Relay DM messages to appeal thread ----------
-    if message.guild is not None:
-        return
-
-    user_id = message.author.id
-    if user_id not in active_appeals:
-        return
-
-    thread_id = active_appeals[user_id]
-    thread = bot.get_channel(thread_id)
-    if not isinstance(thread, discord.Thread):
-        return
-
-    content = message.content or "[no text]"
-    attachments = message.attachments
-
-    text = f"**Message from {message.author} ({message.author.id}) in DM:**\n{content}"
-
-    files = []
-    for att in attachments:
-        try:
-            files.append(await att.to_file())
-        except Exception:
-            pass
-
-    await thread.send(content=text, files=files)
-
-# Note: place the rest of your unchanged command implementations (kick, unban, false-ban, temp_ban_watcher, lock/purge, on_message_delete, on_ready, etc.)
-# into this file as they were; ensure there are NO top-level await calls outside async functions.
 
 # ---------- on_message_delete ----------
 @bot.event
@@ -936,13 +971,11 @@ async def on_message_delete(message: discord.Message):
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
-    # Only care about guild messages in the main server
     if after.author.bot:
         return
     if after.guild is None or after.guild.id != MAIN_GUILD_ID:
         return
 
-    # Check bad words (case-insensitive)
     content = (after.content or "").lower()
     if any(bad in content for bad in BAD_WORDS):
         try:
@@ -968,7 +1001,6 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
                 pass
         return
 
-    # Also run the suspicious/promotional detection on edits
     try:
         suspicious = False
         if message_contains_suspicious_text(after.content):
@@ -1017,23 +1049,81 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         pass
 
 
+@tasks.loop(seconds=60)
+async def temp_ban_watcher():
+    now = now_utc()
+    to_ban: List[int] = []
+    for uid, end_time in list(temp_bans.items()):
+        if now >= end_time:
+            to_ban.append(uid)
+
+    if not to_ban:
+        return
+
+    guild = bot.get_guild(MAIN_GUILD_ID)
+    if guild is None:
+        return
+
+    for uid in to_ban:
+        temp_bans.pop(uid, None)
+        try:
+            try:
+                user = await bot.fetch_user(uid)
+            except Exception:
+                user = bot.get_user(uid)
+
+            await guild.ban(
+                discord.Object(id=uid),
+                reason="Auto-ban after timeout expired (repeated offenses)",
+                delete_message_seconds=0,
+            )
+
+            if user is not None:
+                try:
+                    await user.send(f"You have been banned from {SERVER_NAME} due to repeated rule violations.")
+                except Exception:
+                    pass
+
+            log_ch = get_log_channel()
+            if log_ch is not None:
+                offender_str = f"{uid} {user.mention}" if user else str(uid)
+                embed = discord.Embed(title="Auto-ban enacted", color=discord.Color.dark_red())
+                embed.add_field(name="Offender:", value=offender_str, inline=False)
+                embed.add_field(
+                    name="Reason:",
+                    value="Auto-ban after timeout expired (repeated bad-language offenses)",
+                    inline=False,
+                )
+                embed.set_footer(text=format_time(now_utc()))
+                try:
+                    await log_ch.send(embed=embed)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
 
 # ---------- on_ready (ensure only one on_ready exists) ----------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
+
     main_guild = discord.Object(id=MAIN_GUILD_ID)
     bot.tree.copy_global_to(guild=main_guild)
     await bot.tree.sync(guild=main_guild)
+
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
     bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
+
     try:
         if not temp_ban_watcher.is_running():
             temp_ban_watcher.start()
     except Exception:
         pass
+
     print("Slash commands synced for main and appeal guilds.")
+
 
 # ---------- Start bot ----------
 bot.run(os.getenv("TOKEN"))
