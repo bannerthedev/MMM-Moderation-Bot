@@ -608,6 +608,91 @@ async def on_message_delete(message: discord.Message):
     except Exception:
         pass
 
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    # Only care about guild messages in the main server
+    if after.author.bot:
+        return
+    if after.guild is None or after.guild.id != MAIN_GUILD_ID:
+        return
+
+    # Check bad words (case-insensitive)
+    content = (after.content or "").lower()
+    if any(bad in content for bad in BAD_WORDS):
+        try:
+            await after.delete()
+        except Exception:
+            return
+
+        log_ch = get_delete_log_channel()
+        if log_ch is not None:
+            channel_name = f"#{after.channel.name}" if isinstance(after.channel, discord.TextChannel) else "Unknown"
+            embed = discord.Embed(
+                title="Auto-deleted edited message (bad word)",
+                description=f"Deleted in {channel_name}",
+                color=discord.Color.dark_red()
+            )
+            embed.add_field(name="Author", value=f"{after.author} ({after.author.id})", inline=False)
+            embed.add_field(name="Content (after edit)", value=(after.content or "[no text]")[:1024], inline=False)
+            embed.add_field(name="Message ID", value=str(after.id), inline=False)
+            embed.set_footer(text=format_time(now_utc()))
+            try:
+                await log_ch.send(embed=embed)
+            except Exception:
+                pass
+        return
+
+    # Also run the suspicious/promotional detection on edits
+    try:
+        suspicious = False
+        if message_contains_suspicious_text(after.content):
+            suspicious = True
+        if not suspicious:
+            for e in after.embeds:
+                if embeds_contain_suspicious(e):
+                    suspicious = True
+                    break
+        if not suspicious and attachments_or_embeds_have_images(after):
+            if delete_images_always:
+                suspicious = True
+            else:
+                if message_contains_suspicious_text(after.content) or message_has_suspicious_link(after):
+                    suspicious = True
+        if not suspicious and message_has_suspicious_link(after):
+            suspicious = True
+
+        if suspicious:
+            try:
+                await after.delete()
+            except Exception:
+                return
+
+            log_ch = get_delete_log_channel()
+            if log_ch is not None:
+                channel_name = f"#{after.channel.name}" if isinstance(after.channel, discord.TextChannel) else "Unknown"
+                embed = discord.Embed(
+                    title="Auto-deleted edited message (suspicious)",
+                    description=f"Deleted in {channel_name}",
+                    color=discord.Color.dark_red()
+                )
+                embed.add_field(name="Author", value=f"{after.author} ({after.author.id})", inline=False)
+                embed.add_field(name="Content (after edit)", value=(after.content or "[no text]")[:1024], inline=False)
+                embed.add_field(name="Message ID", value=str(after.id), inline=False)
+                if after.attachments:
+                    urls = "\n".join(att.url for att in after.attachments)
+                    embed.add_field(name="Attachments", value=urls[:1024], inline=False)
+                embed.set_footer(text=format_time(now_utc()))
+                try:
+                    await log_ch.send(embed=embed)
+                except Exception:
+                    pass
+            return
+    except Exception:
+        pass
+
+
+
 # ---------- on_ready (ensure only one on_ready exists) ----------
 @bot.event
 async def on_ready():
