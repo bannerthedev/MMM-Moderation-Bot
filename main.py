@@ -49,7 +49,7 @@ BAD_WORDS = [
     "dickhead",
     "dumb ass",
     "dumbass",
-    "fucker,
+    "fucker",
     "fucking",
     "goddamnit",
     "hell",
