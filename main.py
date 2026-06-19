@@ -915,6 +915,25 @@ async def kick(
         )
         return
 
+    # Log KICK in main server log channel (blue embed)
+    log_ch = get_log_channel()
+    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+        now = now_utc()
+        offender_str = f"{member.id} {member.mention}"
+
+        log_embed = discord.Embed(
+            title="Kick",
+            color=discord.Color.blue()
+        )
+        log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+        log_embed.add_field(name="Reason:", value=reason or "No reason given.", inline=False)
+        log_embed.set_footer(text=format_time(now))
+
+        try:
+            await log_ch.send(embed=log_embed)
+        except Exception:
+            pass
+
     await interaction.response.send_message(
         f"{member.mention} has been **kicked**.\nReason: {reason}",
         ephemeral=True
