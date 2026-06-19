@@ -1166,6 +1166,7 @@ async def false_ban(
 
 @tasks.loop(minutes=1)
 async def temp_ban_watcher():
+    """Check all temp bans and unban users whose time has expired."""
     if not temp_bans:
         return
 
@@ -1178,34 +1179,75 @@ async def temp_ban_watcher():
     if guild is None:
         return
 
+    log_ch = get_log_channel()
+
     for uid in to_unban:
+        # Remove from tracker first so we don't try repeatedly
         temp_bans.pop(uid, None)
 
+        # Fetch user (for DM + log)
         user = None
         try:
             user = await bot.fetch_user(uid)
         except Exception:
             user = bot.get_user(uid)
 
+        # 1) DM the user with a GREEN EMBED
         if user is not None:
             try:
-                msg = (
-                    "Your Time Is Up!\n"
-                    "Your ban time is finally up and now you can go back to enjoying MMM.\n"
-                    "But remember to follow all the rules:\n"
-                    f"• MMM Server Rules: {SERVER_RULES_LINK}\n"
-                    f"• MMM Official Game Rule Book: {GAME_RULEBOOK_LINK}"
+                embed = discord.Embed(
+                    title="Your Time Is Up!",
+                    description=(
+                        "Your ban time is finally up and now you can go back to enjoying MMM.\n\n"
+                        "But remember to follow all the rules:\n"
+                        f"• MMM Server Rules: {SERVER_RULES_LINK}\n"
+                        f"• MMM Official Game Rule Book: {GAME_RULEBOOK_LINK}"
+                    ),
+                    color=discord.Color.green()
                 )
-                await user.send(msg)
+                embed.set_footer(text=format_time(now))
+                await user.send(embed=embed)
             except Exception:
                 pass
 
+        # 2) Unban from the main guild
         try:
             await guild.unban(discord.Object(id=uid), reason="Temporary ban expired")
         except discord.NotFound:
-            pass
+            # Already unbanned (e.g., via appeal) – ignore
+            continue
         except Exception:
-            pass
+            # Any other error – ignore this user in this loop
+            continue
+
+        # 3) LOG the auto-unban in the log channel (same unban format)
+        if log_ch is not None:
+            case_id = get_next_case_id()
+
+            offender_user = user or bot.get_user(uid)
+            if offender_user is not None:
+                offender_str = f"{uid} {offender_user.mention}"
+            else:
+                offender_str = str(uid)
+
+            reason_text = f"Temporary ban expired automatically. Use !reason {case_id} <text> to add more detail"
+
+            log_embed = discord.Embed(
+                title=f"unban | case {case_id}",
+                color=discord.Color.green()
+            )
+            log_embed.add_field(name="Offender:", value=offender_str, inline=False)
+            log_embed.add_field(name="Reason:", value=reason_text, inline=False)
+            log_embed.add_field(
+                name="ID:",
+                value=f"{uid} • {format_time(now)}",
+                inline=False
+            )
+
+            try:
+                await log_ch.send(embed=log_embed)
+            except Exception:
+                pass
 
 
 @bot.event
