@@ -44,6 +44,24 @@ BAD_WORDS = [
     "stfu","b1tch", "a$$", "jew",
 ]
 
+
+
+
+# ---- Automod master switch (runtime toggle) ----
+AUTOMOD_ENABLED = False  # False = OFF, True = ON
+
+# Only these users can run /automod (PUT YOUR IDs HERE)
+AUTOMOD_ALLOWED_USER_IDS = {
+    1101643714033623120,  # <-- your user id
+    1377076510896291941,
+    1330370005732294669,
+    919000592192536666,
+}
+
+
+
+
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
@@ -725,6 +743,44 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "M
             pass
 
     await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}", ephemeral=True)
+
+
+
+
+
+
+@bot.tree.command(name="automod", description="Toggle automod on/off (authorized users only)")
+@app_commands.describe(state="Turn automod on or off")
+@app_commands.choices(state=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+async def automod(interaction: discord.Interaction, state: app_commands.Choice[str]):
+    if interaction.user.id not in AUTOMOD_ALLOWED_USER_IDS:
+        await interaction.response.send_message("You are not allowed to use this command.", ephemeral=True)
+        return
+
+    global AUTOMOD_ENABLED
+    AUTOMOD_ENABLED = (state.value == "on")
+
+    # Start/stop watcher accordingly (only relevant if you use the ban-after-timeout logic)
+    try:
+        if AUTOMOD_ENABLED:
+            if not temp_ban_watcher.is_running():
+                temp_ban_watcher.start()
+        else:
+            if temp_ban_watcher.is_running():
+                temp_ban_watcher.stop()
+    except Exception:
+        pass
+
+    await interaction.response.send_message(
+        f"Automod is now **{'ON' if AUTOMOD_ENABLED else 'OFF'}**.",
+        ephemeral=True
+    )
+
+
+
 
 
 @bot.tree.command(name="false-ban", description="Unban a user due to a false ban and notify them.")
