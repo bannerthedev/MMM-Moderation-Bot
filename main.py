@@ -18,11 +18,14 @@ APPEAL_CHANNEL_ID = 1497668613283254312  # appeal review channel ID (in appeal s
 STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + permissions)
 
 # ROLES IN MAIN SERVER
-MOD_ROLE_ID = 1339202997208616990       # <<< REPLACE with your Mod role ID
-TRIAL_MOD_ROLE_ID = 1374305296326856734 # <<< REPLACE with your Trial Mod role ID
+MOD_ROLE_ID = 1339202997208616990       # Mod role ID
+TRIAL_MOD_ROLE_ID = 1374305296326856734 # Trial Mod role ID
 
-# MAIN SERVER LOG CHANNEL (for ban/unban/false-ban logs)
-LOG_CHANNEL_ID = 1408472513108770816     # <<< REPLACE with your log channel ID
+# MAIN SERVER LOG CHANNEL (for ban/unban/false-ban/kick logs)
+LOG_CHANNEL_ID = 123456789012345678     # <<< REPLACE with your log channel ID
+
+# Channel for deleted-message logs (in main server)
+DELETE_LOG_CHANNEL_ID = 123456789012345678  # <<< REPLACE with your channel ID
 
 MAIN_SERVER_INVITE = "https://discord.gg/d8PpF6wSD6"
 SERVER_NAME = "Monke Monke Monke League"
@@ -32,11 +35,38 @@ APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 SERVER_RULES_LINK = "https://docs.google.com/document/d/12T179hGHc_CTRB1PUsrb62WjMGms6kF2IYAJHh9O5m8/edit?usp=drivesdk"
 GAME_RULEBOOK_LINK = "https://docs.google.com/document/d/1207tu3VHGdRXVx7cIv2HkmYVkn4sV6Pkdoz26JAYAms/edit?usp=drivesdk"
 
+# Words/phrases to auto-delete (all lowercase)
+BAD_WORDS = [
+    "Fuck",
+    "Bitch",
+    "asshole",
+    "bullshit",
+    "bastard",
+    "cock",
+    "dammit",
+    "dick",
+    "dick head",
+    "dickhead",
+    "dumb ass",
+    "dumbass",
+    "fucker,
+    "fucking",
+    "goddamnit",
+    "hell",
+    "jack ass",
+    "jackass",
+    "motherfucker",
+    "nigga",
+    "pussy",
+    "sisterfuck",
+    "niggers",
+    ]
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.dm_messages = True
-intents.message_content = False
+intents.message_content = True  # must be enabled in Dev Portal too
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -47,7 +77,7 @@ def now_utc() -> datetime:
 
 EST = ZoneInfo("America/New_York")
 
-def format_time(dt):
+def format_time(dt: datetime) -> str:
     dt = dt.astimezone(EST)
     return dt.strftime("%m/%d/%Y %I:%M %p EST")
 
@@ -61,7 +91,6 @@ def parse_duration(text: str) -> Optional[timedelta]:
         return None
     text = text.strip().lower()
 
-    # quick exact checks
     if text in ("perm", "permanent", "perma", "permban", "perm ban", "permanent ban"):
         return None
 
@@ -91,6 +120,12 @@ def parse_duration(text: str) -> Optional[timedelta]:
         return timedelta(days=30 * n)
 
     return None
+
+
+def get_delete_log_channel() -> Optional[discord.TextChannel]:
+    ch = bot.get_channel(DELETE_LOG_CHANNEL_ID)
+    return ch if isinstance(ch, discord.TextChannel) else None
+
 
 def format_remaining(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
@@ -272,7 +307,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
         self.add_item(self.reason_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer to keep interaction alive
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -328,7 +362,6 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
                     )
                     return
                 end_time = now + delta
-                # Track this user as a temporary ban
                 temp_bans[self.target.id] = end_time
 
             embed = discord.Embed(
@@ -815,7 +848,7 @@ async def appeal(interaction: discord.Interaction):
     await interaction.response.send_message(agreement_text, view=view, ephemeral=True)
 
 
-# ---------- Relay DM messages to appeal thread ----------
+# ---------- Relay DM messages to appeal thread + ping-delete + auto-mod ----------
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -825,6 +858,56 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # -------- PING-TO-DELETE FEATURE ----------
+    # If someone replies to a message and pings the bot, delete the replied-to message
+    if (
+        message.guild is not None
+        and message.guild.id == MAIN_GUILD_ID
+        and bot.user is not None
+        and bot.user in message.mentions
+        and message.reference is not None
+        and isinstance(message.reference.resolved, discord.Message)
+    ):
+        target_msg: discord.Message = message.reference.resolved
+        try:
+            await target_msg.delete()
+        except Exception:
+            pass
+
+    # -------- AUTO-MOD FILTER (main server text channels only) ----------
+    if message.guild is not None and message.guild.id == MAIN_GUILD_ID:
+        if isinstance(message.channel, discord.TextChannel):
+            lower = message.content.lower() if message.content else ""
+            if any(bad in lower for bad in BAD_WORDS):
+                # Delete the bad message
+                try:
+                    await message.delete()
+                except Exception:
+                    return
+
+                # Log it in delete-log channel
+                log_ch = get_delete_log_channel()
+                if log_ch is not None:
+                    channel_name = f"#{message.channel.name}"
+                    deleted_at = format_time(now_utc())
+                    content = message.content or "[no text]"
+
+                    embed = discord.Embed(
+                        description=f"Auto-deleted bad message in {channel_name}",
+                        color=discord.Color.dark_red()
+                    )
+                    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+                    embed.add_field(name="Content", value=content[:1024], inline=False)
+                    embed.set_footer(text=f"Deleted at {deleted_at}")
+
+                    try:
+                        await log_ch.send(embed=embed)
+                    except Exception:
+                        pass
+
+                return  # stop further handling for this message
+
+    # -------- Relay DM messages to appeal thread ----------
     # Only handle DMs from users with active appeals
     if message.guild is not None:
         return
@@ -951,6 +1034,7 @@ async def unban(
     user_id: str,
     reason: str = "Manual unban"
 ):
+    # Ensure in main server
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message(
             "This command can only be used in the main server.",
@@ -958,6 +1042,7 @@ async def unban(
         )
         return
 
+    # Mods+ only
     if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
             "You must be a moderator or admin to use this command.",
@@ -965,6 +1050,7 @@ async def unban(
         )
         return
 
+    # Validate ID
     try:
         uid = int(user_id)
     except ValueError:
@@ -974,6 +1060,7 @@ async def unban(
         )
         return
 
+    # Block unbanning permanent bans via command (optional strictness)
     if uid in permanent_bans:
         await interaction.response.send_message(
             "This user has a **permanent ban** and cannot be unbanned via this command.",
@@ -983,12 +1070,14 @@ async def unban(
 
     guild = interaction.guild
 
+    # Try to fetch user for DM
     user = None
     try:
         user = await interaction.client.fetch_user(uid)
     except Exception:
         user = interaction.client.get_user(uid)
 
+    # Unban
     try:
         await guild.unban(discord.Object(id=uid), reason=reason)
     except discord.NotFound:
@@ -1004,11 +1093,22 @@ async def unban(
         )
         return
 
+    # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
     temp_bans.pop(uid, None)
 
-    # Log UNBAN in main server log channel
+    # Kick from appeal server if they are there
+    appeal_guild = interaction.client.get_guild(APPEAL_GUILD_ID)
+    if appeal_guild is not None:
+        try:
+            member = appeal_guild.get_member(uid)
+            if member is not None:
+                await member.kick(reason="Unbanned from main server - removed from appeal server")
+        except Exception:
+            pass
+
+    # Log unban in main server log channel
     log_ch = get_log_channel()
     if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
         case_id = get_next_case_id()
@@ -1019,6 +1119,7 @@ async def unban(
         else:
             reason_text = reason
 
+        # Try to get a display name/mention for the offender
         offender_user = user or interaction.client.get_user(uid)
         if offender_user is not None:
             offender_str = f"{uid} {offender_user.mention}"
@@ -1042,6 +1143,7 @@ async def unban(
         except Exception:
             pass
 
+    # DM the user (if we could fetch them)
     if user is not None:
         try:
             embed = discord.Embed(
@@ -1068,14 +1170,17 @@ async def false_ban(
     interaction: discord.Interaction,
     user_id: str,
 ):
+    # Ensure in main server
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
         return
 
+    # Mods+ only
     if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True)
         return
 
+    # Validate ID
     try:
         uid = int(user_id)
     except ValueError:
@@ -1085,6 +1190,7 @@ async def false_ban(
         )
         return
 
+    # Block unbanning permanent bans via command (optional strictness)
     if uid in permanent_bans:
         await interaction.response.send_message(
             "This user has a **permanent ban** and cannot be unbanned via this command.",
@@ -1094,12 +1200,14 @@ async def false_ban(
 
     guild = interaction.guild
 
+    # Try to fetch user for DM
     user = None
     try:
         user = await interaction.client.fetch_user(uid)
     except Exception:
         user = interaction.client.get_user(uid)
 
+    # Unban
     try:
         await guild.unban(discord.Object(id=uid), reason="False ban correction")
     except discord.NotFound:
@@ -1115,11 +1223,22 @@ async def false_ban(
         )
         return
 
+    # Clear any ban-tracking flags, just in case
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
     temp_bans.pop(uid, None)
 
-    # Log FALSE BAN in main server log channel
+    # Kick from appeal server if they are there
+    appeal_guild = interaction.client.get_guild(APPEAL_GUILD_ID)
+    if appeal_guild is not None:
+        try:
+            member = appeal_guild.get_member(uid)
+            if member is not None:
+                await member.kick(reason="False ban corrected - removed from appeal server")
+        except Exception:
+            pass
+
+    # Log false ban correction in main server log channel
     log_ch = get_log_channel()
     if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
         now = now_utc()
@@ -1132,7 +1251,7 @@ async def false_ban(
 
         log_embed = discord.Embed(
             title="False ban",
-            color=discord.Color.magenta()
+            color=discord.Color.magenta()  # pink-ish
         )
         log_embed.add_field(name="Offender:", value=offender_str, inline=False)
         log_embed.add_field(
@@ -1147,6 +1266,7 @@ async def false_ban(
         except Exception:
             pass
 
+    # DM the user
     if user is not None:
         try:
             msg = (
@@ -1220,7 +1340,17 @@ async def temp_ban_watcher():
             # Any other error – ignore this user in this loop
             continue
 
-        # 3) LOG the auto-unban in the log channel (same unban format)
+        # 3) Kick from appeal server if they are there
+        appeal_guild = bot.get_guild(APPEAL_GUILD_ID)
+        if appeal_guild is not None:
+            try:
+                member = appeal_guild.get_member(uid)
+                if member is not None:
+                    await member.kick(reason="Temporary ban expired - removed from appeal server")
+            except Exception:
+                pass
+
+        # 4) LOG the auto-unban in the log channel (same unban format)
         if log_ch is not None:
             case_id = get_next_case_id()
 
@@ -1250,18 +1380,365 @@ async def temp_ban_watcher():
                 pass
 
 
+
+# Suspicious keywords / domains for images/links
+SUSPICIOUS_KEYWORDS = {
+    "withdraw", "withdrawal", "promo", "promo code", "activate", "activation",
+    "bonus", "rakeback", "deposit", "launch", "click here", "claim", "earn",
+    "giveaway", "free", "crypto", "usdt", "btc", "ethereum", "metamask"
+}
+SUSPICIOUS_DOMAINS = {
+    "some-scam-site.com", "tiny.cc", "bit.ly", "free-giveaway.example"  # add domains you want blocked
+}
+# If True, any image attachment will be deleted even without keywords
+delete_images_always = False
+
+def message_contains_suspicious_text(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    for kw in SUSPICIOUS_KEYWORDS:
+        if kw in low:
+            return True
+    return False
+
+def embeds_contain_suspicious(embed: discord.Embed) -> bool:
+    # check embed title/description/author/fields for keywords
+    if embed.title and message_contains_suspicious_text(embed.title):
+        return True
+    if embed.description and message_contains_suspicious_text(embed.description):
+        return True
+    if embed.author and embed.author.name and message_contains_suspicious_text(embed.author.name):
+        return True
+    for f in embed.fields:
+        if message_contains_suspicious_text(f.name) or message_contains_suspicious_text(f.value):
+            return True
+    return False
+
+def attachments_or_embeds_have_images(message: discord.Message) -> bool:
+    if message.attachments:
+        for att in message.attachments:
+            if any(att.filename.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                return True
+    for e in message.embeds:
+        if e.image or e.thumbnail:
+            return True
+    return False
+
+def message_has_suspicious_link(message: discord.Message) -> bool:
+    # quick domain check for urls in content and embeds
+    text = (message.content or "") + " "
+    # find simple urls
+    parts = text.split()
+    for p in parts:
+        if p.startswith("http://") or p.startswith("https://") or "." in p:
+            for d in SUSPICIOUS_DOMAINS:
+                if d in p:
+                    return True
+    # also check embed urls
+    for e in message.embeds:
+        if e.url:
+            for d in SUSPICIOUS_DOMAINS:
+                if d in e.url:
+                    return True
+    return False
+
+# Insert this block into your on_message handling (before relay)
+try:
+    suspicious = False
+
+    # 1) Check text keywords
+    if message_contains_suspicious_text(message.content):
+        suspicious = True
+
+    # 2) Check embeds for suspicious text
+    if not suspicious:
+        for e in message.embeds:
+            if embeds_contain_suspicious(e):
+                suspicious = True
+                break
+
+    # 3) Check attachments / images
+    has_image = attachments_or_embeds_have_images(message)
+    if not suspicious and has_image:
+        if delete_images_always:
+            suspicious = True
+        else:
+            # if message also contains keywords or suspicious link, mark suspicious
+            if message_contains_suspicious_text(message.content):
+                suspicious = True
+            else:
+                for e in message.embeds:
+                    if embeds_contain_suspicious(e):
+                        suspicious = True
+                        break
+                if not suspicious and message_has_suspicious_link(message):
+                    suspicious = True
+
+    # 4) Check suspicious links/domains
+    if not suspicious and message_has_suspicious_link(message):
+        suspicious = True
+
+    if suspicious:
+        # try to delete the message
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # log to delete-log channel
+        log_ch = get_delete_log_channel()
+        if log_ch is not None:
+            channel_name = f"#{message.channel.name}" if isinstance(message.channel, discord.TextChannel) else "DM"
+            embed = discord.Embed(
+                title="Auto-deleted suspicious message",
+                description=f"Deleted in {channel_name}",
+                color=discord.Color.dark_red()
+            )
+            embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+            embed.add_field(name="Content", value=(message.content or "[no text]")[:1024], inline=False)
+            embed.add_field(name="Message ID", value=str(message.id), inline=False)
+            # attachments urls
+            if message.attachments:
+                urls = "\n".join(att.url for att in message.attachments)
+                embed.add_field(name="Attachments", value=urls[:1024], inline=False)
+            embed.set_footer(text=format_time(now_utc()))
+            try:
+                await log_ch.send(embed=embed)
+            except Exception:
+                pass
+
+        # stop further handling this message
+        return
+except Exception:
+    # don't break the whole bot if this check errors
+    pass
+
+
+
+
+
+
+# ---------- Channel lock commands ----------
+
+@bot.tree.command(name="lock-down", description="Lock this channel so only mods+ can talk.")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def lock_down(interaction: discord.Interaction):
+    # Main server only
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message(
+            "You must be a moderator or admin to use this command.",
+            ephemeral=True
+        )
+        return
+
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message(
+            "This command can only be used in text channels or threads.",
+            ephemeral=True
+        )
+        return
+
+    # Deny @everyone from sending messages
+    try:
+        await channel.set_permissions(
+            interaction.guild.default_role,
+            send_messages=False
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"Failed to lock this channel: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        "This channel has been **locked**. Only staff can talk now.",
+        ephemeral=True
+    )
+
+
+# Prefix command version: ?lock
+@bot.command(name="lock")
+@commands.guild_only()
+async def lock_prefix(ctx: commands.Context):
+    # Main server only
+    if ctx.guild is None or ctx.guild.id != MAIN_GUILD_ID:
+        return
+
+    # Mods+ only
+    if not isinstance(ctx.author, discord.Member) or not is_mod_or_admin(ctx.author):
+        await ctx.reply("You must be a moderator or admin to use this command.", mention_author=False)
+        return
+
+    channel = ctx.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await ctx.reply("This command can only be used in text channels or threads.", mention_author=False)
+        return
+
+    try:
+        await channel.set_permissions(
+            ctx.guild.default_role,
+            send_messages=False
+        )
+    except Exception as e:
+        await ctx.reply(f"Failed to lock this channel: `{e}`", mention_author=False)
+        return
+
+    await ctx.reply("This channel has been **locked**. Only staff can talk now.", mention_author=False)
+
+
+# ---------- Purge commands (admins only) ----------
+
+purge = app_commands.Group(name="purge", description="Purge messages in a channel")
+
+
+@purge.command(name="all", description="Delete a number of recent messages in this channel.")
+@app_commands.describe(
+    count="How many recent messages to delete (max 1000 recommended)"
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def purge_all(interaction: discord.Interaction, count: int):
+    # Must be in main guild
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
+        return
+
+    # Admins only (not just mods)
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be an administrator to use this command.",
+            ephemeral=True
+        )
+        return
+
+    if count <= 0:
+        await interaction.response.send_message(
+            "Please provide a positive number of messages to delete.",
+            ephemeral=True
+        )
+        return
+
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message(
+            "This command can only be used in text channels or threads.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Fetch messages
+    messages = []
+    async for msg in channel.history(limit=count):
+        messages.append(msg)
+
+    if not messages:
+        await interaction.followup.send("No messages found to delete.", ephemeral=True)
+        return
+
+    # Count how many per user
+    per_user: Dict[str, int] = {}
+    for msg in messages:
+        name = f"{msg.author} ({msg.author.id})"
+        per_user[name] = per_user.get(name, 0) + 1
+
+    # Bulk delete
+    try:
+        await channel.delete_messages(messages)
+    except Exception as e:
+        await interaction.followup.send(
+            f"Failed to delete messages: `{e}`",
+            ephemeral=True
+        )
+        return
+
+    total_deleted = len(messages)
+
+    # Build summary text
+    lines = [f"{total_deleted} messages were removed.", ""]
+    for user_name, amt in sorted(per_user.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"{user_name} – {amt}")
+
+    summary = "\n".join(lines)
+
+    # Send summary in the channel (this message is NOT deleted)
+    await channel.send(summary)
+
+    # Let the invoker know it's done (ephemeral)
+    await interaction.followup.send("Purge complete.", ephemeral=True)
+
+
+# Register the group with the tree
+bot.tree.add_command(purge)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    # Ignore bots
+    if message.author.bot:
+        return
+
+    # Only log for main guild
+    if message.guild is None or message.guild.id != MAIN_GUILD_ID:
+        return
+
+    log_ch = get_delete_log_channel()
+    if log_ch is None:
+        return
+
+    channel_name = f"#{message.channel.name}" if isinstance(message.channel, discord.TextChannel) else "Unknown channel"
+    content = message.content or "[no text]"
+    created_at_text = format_time(now_utc())
+
+    embed = discord.Embed(
+        description=f"Message deleted in {channel_name}",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+    embed.add_field(name="Content", value=content[:1024], inline=False)
+    embed.add_field(name="Message ID", value=str(message.id), inline=False)
+    embed.set_footer(text=f"Deleted at {created_at_text}")
+
+    # If attachments, list them
+    if message.attachments:
+        urls = "\n".join(att.url for att in message.attachments)
+        embed.add_field(name="Attachments", value=urls[:1024], inline=False)
+
+    try:
+        await log_ch.send(embed=embed)
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+    # Sync main guild commands (for /submit-report, /kick, /unban, /false-ban, /lock-down, /purge)
     main_guild = discord.Object(id=MAIN_GUILD_ID)
     bot.tree.copy_global_to(guild=main_guild)
     await bot.tree.sync(guild=main_guild)
 
+    # Sync appeal guild commands (for /appeal)
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
     bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
 
+    # Start temp-ban watcher
     if not temp_ban_watcher.is_running():
         temp_ban_watcher.start()
 
