@@ -381,7 +381,7 @@ async def on_message(message: discord.Message):
         # continue processing (do not return) so we still enforce other checks on the reply
 
     # -------- AUTO-MOD BAD_WORDS (escalating timeouts -> ban) ----------
-    if message.guild is not None and message.guild.id == MAIN_GUILD_ID and isinstance(message.channel, discord.TextChannel):
+    if AUTOMOD_ENABLED and message.guild is not None and message.guild.id == MAIN_GUILD_ID and isinstance(message.channel, discord.TextChannel):
         content_lower = (message.content or "").lower()
         if any(bad in content_lower for bad in BAD_WORDS):
             uid = message.author.id
@@ -495,65 +495,70 @@ async def on_message(message: discord.Message):
             return
 
     # -------- SUSPICIOUS PROMO/SCAM DETECTION ----------
-    try:
-        suspicious = False
+    if AUTOMOD_ENABLED:
+        try:
+            suspicious = False
 
-        if message_contains_suspicious_text(message.content):
-            suspicious = True
-
-        if not suspicious:
-            for e in message.embeds:
-                if embeds_contain_suspicious(e):
-                    suspicious = True
-                    break
-
-        has_image = attachments_or_embeds_have_images(message)
-        if not suspicious and has_image:
-            if delete_images_always:
+            # 1) content keywords
+            if message_contains_suspicious_text(message.content):
                 suspicious = True
-            else:
-                if message_contains_suspicious_text(message.content):
+
+            # 2) embed text keywords
+            if not suspicious:
+                for e in message.embeds:
+                    if embeds_contain_suspicious(e):
+                        suspicious = True
+                        break
+
+            # 3) image + optional extra checks
+            has_image = attachments_or_embeds_have_images(message)
+            if not suspicious and has_image:
+                if delete_images_always:
                     suspicious = True
                 else:
-                    for e in message.embeds:
-                        if embeds_contain_suspicious(e):
-                            suspicious = True
-                            break
-                    if not suspicious and message_has_suspicious_link(message):
+                    if message_contains_suspicious_text(message.content):
                         suspicious = True
+                    else:
+                        for e in message.embeds:
+                            if embeds_contain_suspicious(e):
+                                suspicious = True
+                                break
+                        if not suspicious and message_has_suspicious_link(message):
+                            suspicious = True
 
-        if not suspicious and message_has_suspicious_link(message):
-            suspicious = True
+            # 4) suspicious domains/links
+            if not suspicious and message_has_suspicious_link(message):
+                suspicious = True
 
-        if suspicious:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-
-            log_ch = get_delete_log_channel()
-            if log_ch is not None:
-                channel_name = f"#{message.channel.name}" if isinstance(message.channel, discord.TextChannel) else "DM"
-                embed = discord.Embed(
-                    title="Auto-deleted suspicious message",
-                    description=f"Deleted in {channel_name}",
-                    color=discord.Color.dark_red()
-                )
-                embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
-                embed.add_field(name="Content", value=(message.content or "[no text]")[:1024], inline=False)
-                embed.add_field(name="Message ID", value=str(message.id), inline=False)
-                if message.attachments:
-                    urls = "\n".join(att.url for att in message.attachments)
-                    embed.add_field(name="Attachments", value=urls[:1024], inline=False)
-                embed.set_footer(text=format_time(now_utc()))
+            if suspicious:
                 try:
-                    await log_ch.send(embed=embed)
+                    await message.delete()
                 except Exception:
                     pass
 
-            return
-    except Exception:
-        pass
+                log_ch = get_delete_log_channel()
+                if log_ch is not None:
+                    channel_name = f"#{message.channel.name}" if isinstance(message.channel, discord.TextChannel) else "DM"
+                    embed = discord.Embed(
+                        title="Auto-deleted suspicious message",
+                        description=f"Deleted in {channel_name}",
+                        color=discord.Color.dark_red()
+                    )
+                    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+                    embed.add_field(name="Content", value=(message.content or "[no text]")[:1024], inline=False)
+                    embed.add_field(name="Message ID", value=str(message.id), inline=False)
+                    if message.attachments:
+                        urls = "\n".join(att.url for att in message.attachments)
+                        embed.add_field(name="Attachments", value=urls[:1024], inline=False)
+                    embed.set_footer(text=format_time(now_utc()))
+                    try:
+                        await log_ch.send(embed=embed)
+                    except Exception:
+                        pass
+
+                return
+        except Exception:
+            pass
 
     # -------- Relay DM messages to appeal thread ----------
     if message.guild is None:
@@ -1173,7 +1178,7 @@ async def on_ready():
     await bot.tree.sync(guild=appeal_guild)
 
     try:
-        if not temp_ban_watcher.is_running():
+        if AUTOMOD_ENABLED and (not temp_ban_watcher.is_running()):
             temp_ban_watcher.start()
     except Exception:
         pass
