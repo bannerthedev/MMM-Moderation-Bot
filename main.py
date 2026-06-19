@@ -511,42 +511,55 @@ purge = app_commands.Group(
     description="Purge messages in a channel"
 )
 
-# child command — do NOT use @app_commands.guilds here
 @purge.command(name="all", description="Delete a number of recent messages in this channel.")
 @app_commands.describe(count="How many recent messages to delete (max 1000 recommended)")
 async def purge_all(interaction: discord.Interaction, count: int):
-        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
+    # Ensure this runs only in the main guild
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+        return
+
+    # Admins only
     if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True); return
+        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True)
+        return
+
     if count <= 0:
-        await interaction.response.send_message("Please provide a positive number of messages to delete.", ephemeral=True); return
+        await interaction.response.send_message("Please provide a positive number of messages to delete.", ephemeral=True)
+        return
 
     channel = interaction.channel
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-        await interaction.response.send_message("This command can only be used in text channels or threads.", ephemeral=True); return
+        await interaction.response.send_message("This command can only be used in text channels or threads.", ephemeral=True)
+        return
 
     await interaction.response.defer(ephemeral=True)
+
     messages = []
     async for msg in channel.history(limit=count):
         messages.append(msg)
-    if not messages:
-        await interaction.followup.send("No messages found to delete.", ephemeral=True); return
 
-    per_user: Dict[str,int] = {}
+    if not messages:
+        await interaction.followup.send("No messages found to delete.", ephemeral=True)
+        return
+
+    per_user: Dict[str, int] = {}
     for msg in messages:
         name = f"{msg.author} ({msg.author.id})"
-        per_user[name] = per_user.get(name,0) + 1
+        per_user[name] = per_user.get(name, 0) + 1
 
     try:
         await channel.delete_messages(messages)
     except Exception as e:
-        await interaction.followup.send(f"Failed to delete messages: `{e}`", ephemeral=True); return
+        await interaction.followup.send(f"Failed to delete messages: `{e}`", ephemeral=True)
+        return
 
     total_deleted = len(messages)
     lines = [f"{total_deleted} messages were removed.", ""]
     for user_name, amt in sorted(per_user.items(), key=lambda x: x[1], reverse=True):
         lines.append(f"{user_name} – {amt}")
     summary = "\n".join(lines)
+
     await channel.send(summary)
     await interaction.followup.send("Purge complete.", ephemeral=True)
 
