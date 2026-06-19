@@ -41,7 +41,8 @@ BAD_WORDS = [
     "dick head", "dickhead", "dumb ass", "dumbass", "fucker", "fucking", "goddamnit",
     "hell", "jack ass", "jackass", "motherfucker", "nigga", "pussy", "sisterfuck",
     "niggers", "pee pee", "Pee Pee", "PEE PEE", "penis", "penis", "balls", 
-    "cocksucker", "retartd", "retarted", "shi", "dih", "rtrd", "nga",
+    "cocksucker", "retartd", "retarted", "shi", "dih", "rtrd", "nga", "stfu",
+    "b1tch", "a$$", "freak",
 ]
 
 intents = discord.Intents.default()
