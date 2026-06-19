@@ -505,11 +505,14 @@ async def on_message(message: discord.Message):
 
 
 
-purge = app_commands.Group(name="purge", description="Purge messages in a channel")
+purge = app_commands.Group(
+    name="purge",
+    description="Purge messages in a channel",
+    guild=discord.Object(id=MAIN_GUILD_ID)
+)
 
 @purge.command(name="all", description="Delete a number of recent messages in this channel.")
 @app_commands.describe(count="How many recent messages to delete (max 1000 recommended)")
-@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
 async def purge_all(interaction: discord.Interaction, count: int):
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
@@ -548,7 +551,6 @@ async def purge_all(interaction: discord.Interaction, count: int):
     await interaction.followup.send("Purge complete.", ephemeral=True)
 
 bot.tree.add_command(purge)
-
 
 
 @bot.tree.command(name="lock-down", description="Lock this channel so only mods+ can talk.")
