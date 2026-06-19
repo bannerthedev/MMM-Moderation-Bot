@@ -505,16 +505,16 @@ async def on_message(message: discord.Message):
 
 
 
+# create the group (no guild arg)
 purge = app_commands.Group(
     name="purge",
-    description="Purge messages in a channel",
-    guild=discord.Object(id=MAIN_GUILD_ID)
+    description="Purge messages in a channel"
 )
 
+# child command — do NOT use @app_commands.guilds here
 @purge.command(name="all", description="Delete a number of recent messages in this channel.")
 @app_commands.describe(count="How many recent messages to delete (max 1000 recommended)")
 async def purge_all(interaction: discord.Interaction, count: int):
-    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
         await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
     if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True); return
