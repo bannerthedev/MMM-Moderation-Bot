@@ -947,39 +947,49 @@ async def lock_prefix(ctx: commands.Context):
     await ctx.reply("This channel has been **locked**. Only staff can talk now.", mention_author=False)
 
 
-@bot.tree.command(name="unban", description="Unban a user from the main server")
-@app_commands.describe(user_id="ID of the user to unban (right click -> Copy ID)", reason="Reason for the unban (optional)")
-@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
-async def unban(interaction: discord.Interaction, user_id: str, reason: str = "Manual unban"):
-    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True); return
-    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-        await interaction.response.send_message("You must be a moderator or admin to use this command.", ephemeral=True); return
+@bot.command(name="unban")
+@commands.guild_only()
+async def unban_prefix(ctx: commands.Context, user_id: str, *, reason: str = "Manual unban"):
+    if ctx.guild is None or ctx.guild.id != MAIN_GUILD_ID:
+        return
+
+    if not isinstance(ctx.author, discord.Member) or not is_mod_or_admin(ctx.author):
+        await ctx.reply("You must be a moderator or admin to use this command.", mention_author=False)
+        return
+
     try:
         uid = int(user_id)
     except ValueError:
-        await interaction.response.send_message("Please provide a valid user ID.", ephemeral=True); return
+        await ctx.reply("Please provide a valid user ID.", mention_author=False)
+        return
+
     if uid in permanent_bans:
-        await interaction.response.send_message("This user has a **permanent ban** and cannot be unbanned via this command.", ephemeral=True); return
+        await ctx.reply(
+            "This user has a **permanent ban** and cannot be unbanned via this command.",
+            mention_author=False
+        )
+        return
 
     user = None
     try:
-        user = await interaction.client.fetch_user(uid)
+        user = await ctx.bot.fetch_user(uid)
     except Exception:
-        user = interaction.client.get_user(uid)
+        user = ctx.bot.get_user(uid)
 
     try:
-        await interaction.guild.unban(discord.Object(id=uid), reason=reason)
+        await ctx.guild.unban(discord.Object(id=uid), reason=reason)
     except discord.NotFound:
-        await interaction.response.send_message("That user is not currently banned.", ephemeral=True); return
+        await ctx.reply("That user is not currently banned.", mention_author=False)
+        return
     except Exception as e:
-        await interaction.response.send_message(f"Failed to unban user: `{e}`", ephemeral=True); return
+        await ctx.reply(f"Failed to unban user: `{e}`", mention_author=False)
+        return
 
     permanent_bans.discard(uid)
     earliest_appeal_time.pop(uid, None)
     temp_bans.pop(uid, None)
 
-    appeal_guild = interaction.client.get_guild(APPEAL_GUILD_ID)
+    appeal_guild = ctx.bot.get_guild(APPEAL_GUILD_ID)
     if appeal_guild is not None:
         try:
             member = appeal_guild.get_member(uid)
@@ -989,11 +999,11 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "M
             pass
 
     log_ch = get_log_channel()
-    if log_ch is not None and interaction.guild.id == MAIN_GUILD_ID:
+    if log_ch is not None and ctx.guild.id == MAIN_GUILD_ID:
         case_id = get_next_case_id()
         now = now_utc()
         reason_text = reason if reason and reason.strip() not in ("Manual unban",) else f"No reason given, use !reason {case_id} <text> to add one"
-        offender_user = user or interaction.client.get_user(uid)
+        offender_user = user or ctx.bot.get_user(uid)
         offender_str = f"{uid} {offender_user.mention}" if offender_user else str(uid)
         log_embed = discord.Embed(title=f"unban | case {case_id}", color=discord.Color.green())
         log_embed.add_field(name="Offender:", value=offender_str, inline=False)
@@ -1006,12 +1016,19 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "M
 
     if user is not None:
         try:
-            embed = discord.Embed(title="You Have Been Unbanned", description=f"[our main server]({MAIN_SERVER_INVITE})", color=discord.Color.green())
+            embed = discord.Embed(
+                title="You Have Been Unbanned",
+                description=f"[our main server]({MAIN_SERVER_INVITE})",
+                color=discord.Color.green()
+            )
             await user.send(embed=embed)
         except Exception:
             pass
 
-    await interaction.response.send_message(f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}", ephemeral=True)
+    await ctx.reply(
+        f"User with ID `{uid}` has been **unbanned**.\nReason: {reason}",
+        mention_author=False
+    )
 
 
 
