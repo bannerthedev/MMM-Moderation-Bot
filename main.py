@@ -634,6 +634,39 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # ---------- TICKET AI + STAFF REQUEST ----------
+    if message.guild is not None and message.guild.id == MAIN_GUILD_ID:
+        ch = message.channel
+        ch_name = (ch.name or "").lower() if isinstance(ch, discord.TextChannel) else ""
+
+        is_ticket_channel = ch_name.startswith("ticket-") or ch_name.startswith("dm-")
+
+        if is_ticket_channel:
+            content_low = (message.content or "").lower()
+
+            # user asks to speak to staff
+            if "i would like to speak to the staff" in content_low:
+                staff_role = message.guild.get_role(STAFF_PING_ROLE_ID_MAIN) or message.guild.get_role(MOD_ROLE_ID)
+                staff_ping = staff_role.mention if staff_role else "@staff"
+                try:
+                    await ch.send(f"{staff_ping} {message.author.mention} wants to talk to you.")
+                except Exception:
+                    pass
+
+            # user mentions the bot -> AI helper text
+            if bot.user and bot.user in message.mentions:
+                ai_reply = (
+                    "Hello, I'm the ticket assistant.\n\n"
+                    "You can ask me questions here like a normal chat. "
+                    "If you need a real staff member, type:\n"
+                    "`I would like to speak to the staff`\n"
+                    "and I will ping staff for you."
+                )
+                try:
+                    await ch.send(ai_reply)
+                except Exception:
+                    pass
+
     # -------- PING-TO-DELETE FEATURE ----------
     if (
         message.guild is not None
@@ -763,6 +796,100 @@ async def on_message(message: discord.Message):
                     pass
 
             return
+
+    # -------- SUSPICIOUS PROMO/SCAM DETECTION ----------
+    if AUTOMOD_ENABLED:
+        try:
+            suspicious = False
+
+            # 1) content keywords
+            if message_contains_suspicious_text(message.content):
+                suspicious = True
+
+            # 2) embed text keywords
+            if not suspicious:
+                for e in message.embeds:
+                    if embeds_contain_suspicious(e):
+                        suspicious = True
+                        break
+
+            # 3) image + optional extra checks
+            has_image = attachments_or_embeds_have_images(message)
+            if not suspicious and has_image:
+                if delete_images_always:
+                    suspicious = True
+                else:
+                    if message_contains_suspicious_text(message.content):
+                        suspicious = True
+                    else:
+                        for e in message.embeds:
+                            if embeds_contain_suspicious(e):
+                                suspicious = True
+                                break
+                        if not suspicious and message_has_suspicious_link(message):
+                            suspicious = True
+
+            # 4) suspicious domains/links
+            if not suspicious and message_has_suspicious_link(message):
+                suspicious = True
+
+            if suspicious:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+
+                log_ch = get_delete_log_channel()
+                if log_ch is not None:
+                    channel_name = f"#{message.channel.name}" if isinstance(message.channel, discord.TextChannel) else "DM"
+                    embed = discord.Embed(
+                        title="Auto-deleted suspicious message",
+                        description=f"Deleted in {channel_name}",
+                        color=discord.Color.dark_red()
+                    )
+                    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+                    embed.add_field(name="Content", value=(message.content or "[no text]")[:1024], inline=False)
+                    embed.add_field(name="Message ID", value=str(message.id), inline=False)
+                    if message.attachments:
+                        urls = "\n".join(att.url for att in message.attachments)
+                        embed.add_field(name="Attachments", value=urls[:1024], inline=False)
+                    embed.set_footer(text=format_time(now_utc()))
+                    try:
+                        await log_ch.send(embed=embed)
+                    except Exception:
+                        pass
+
+                return
+        except Exception:
+            pass
+
+    # -------- Relay DM messages to appeal thread ----------
+    if message.guild is None:
+        user_id = message.author.id
+        if user_id not in active_appeals:
+            return
+
+        thread_id = active_appeals.get(user_id)
+        thread = bot.get_channel(thread_id)
+        if not isinstance(thread, discord.Thread):
+            return
+
+        content = message.content or "[no text]"
+        attachments = message.attachments
+
+        text = f"**Message from {message.author} ({message.author.id}) in DM:**\n{content}"
+
+        files = []
+        for att in attachments:
+            try:
+                files.append(await att.to_file())
+            except Exception:
+                pass
+
+        try:
+            await thread.send(content=text, files=files)
+        except Exception:
+            pass
 
     # -------- SUSPICIOUS PROMO/SCAM DETECTION ----------
     if AUTOMOD_ENABLED:
