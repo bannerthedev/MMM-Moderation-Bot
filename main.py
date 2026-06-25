@@ -1487,56 +1487,79 @@ class TicketTypeView(discord.ui.View):
     dm_category="Category where DM tickets are created (server side)",
     in_server_category="Category where in-server tickets are created",
 )
-async def create_ticket(
-    interaction: discord.Interaction,
-    dm_category: discord.CategoryChannel,
-    in_server_category: discord.CategoryChannel,
-):
-    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-        await interaction.response.send_message("Use this in the main server.", ephemeral=True)
-        return
+    async def _create_dm_ticket(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            return
+        cat = guild.get_channel(self.dm_category_id)
+        if not isinstance(cat, discord.CategoryChannel):
+            await interaction.response.send_message("DM ticket category not found.", ephemeral=True)
+            return
 
-    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True)
-        return
+        user = interaction.user
+        name_base = f"dm-{user.name}".lower().replace(" ", "-")
+        channel_name = name_base[:90]
 
-    # choose target channel
-    target_ch = bot.get_channel(TICKET_PANEL_CHANNEL_ID)
-    if not isinstance(target_ch, discord.TextChannel):
-        target_ch = interaction.channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        # staff roles only (DM ticket is between user & staff)
+        for rid in (MOD_ROLE_ID, TRIAL_MOD_ROLE_ID):
+            if not rid:
+                continue
+            r = guild.get_role(rid)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-    # main info embed (blue)
-    desc = (
-        "Community Support and Report Ticket Bot.\n"
-        "❌ Misuse of Tickets will result in Punishment ❌\n"
-        "- 1st Offense - Warning\n"
-        "- 2nd Offense - Timeout (1 Day - 1 Week)\n"
-        "- 3rd Offense - Timeout Again (Double The Previous)\n"
-        "- 4th Offense - Stacking 1 Month Bans\n\n"
-        "Open the ticket type that fits your issue best. Please read the Terms of Service before opening any ticket.\n"
-        "Before opening any ticket, know what you want.\n\n"
-        "**Website Help** – This is for helping with the website or with other stuff according to the website.\n"
-        "**General Help** – Get help with general questions or issues.\n"
-        "**Report A Player** – Report a player for breaking the rules. You can send links, videos, and photos as evidence.\n"
-    )
-    embed = discord.Embed(
-        title="Ticket System",
-        description=desc,
-        color=discord.Color.blue(),
-    )
+        ch = await guild.create_text_channel(
+            name=channel_name,
+            category=cat,
+            overwrites=overwrites,
+            reason=f"DM {self.ticket_type} ticket for {user}",
+        )
 
-    view = TicketTypeView(dm_category_id=dm_category.id, server_category_id=in_server_category.id)
+        # map user -> channel
+        DM_TICKET_CHANNELS[user.id] = ch.id
 
-    try:
-        await target_ch.send(embed=embed, view=view)
-    except Exception as e:
-        await interaction.response.send_message(f"Failed to send ticket panel: `{e}`", ephemeral=True)
-        return
+        # 1) staff ping as plain message ABOVE the embed
+        staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
+        staff_ping = staff_role.mention if staff_role else "@staff"
+        try:
+            await ch.send(staff_ping)
+        except Exception:
+            pass
 
-    await interaction.response.send_message(
-        f"Ticket panel created in {target_ch.mention}.",
-        ephemeral=True,
-    )
+        # 2) embed + buttons in the staff channel
+        embed = discord.Embed(
+            title=f"{self.ticket_type} DM Ticket",
+            description="This channel relays messages between staff and the user via DMs.",
+            color=discord.Color.blue(),
+        )
+        try:
+            await ch.send(embed=embed, view=DMTicketChannelView(owner_id=user.id))
+        except Exception:
+            try:
+                await ch.send(embed=embed)
+            except Exception:
+                pass
+
+        # 3) DM the user (NO buttons in DM)
+        try:
+            dm_embed = discord.Embed(
+                title=f"{self.ticket_type} Ticket",
+                description=(
+                    f"{user.mention}\n"
+                    "This ticket is for you and the staff to talk and help you out.\n"
+                    "You can send messages here and they will be seen by staff."
+                ),
+                color=discord.Color.blue(),
+            )
+            await user.send(embed=dm_embed)
+        except Exception:
+            pass
+
+        await interaction.response.send_message("Your DM ticket has been created. Check your DMs.", ephemeral=True)
 
 
 
