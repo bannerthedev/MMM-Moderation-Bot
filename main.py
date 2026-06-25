@@ -1350,8 +1350,18 @@ class TicketCloseConfirmView(discord.ui.View):
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         ch = interaction.client.get_channel(self.channel_id)
+        closer = interaction.user
 
-        # For DM tickets, announce that the user's ticket was closed
+        # DM the ticket owner (plain text) if we know them
+        if self.owner_id:
+            owner_user = interaction.client.get_user(self.owner_id) or await interaction.client.fetch_user(self.owner_id)
+            if owner_user:
+                try:
+                    await owner_user.send(f"{owner_user.mention} Your ticket has been closed by {closer.mention}")
+                except Exception:
+                    pass
+
+        # For DM tickets, also announce in the staff channel before deleting
         if self.is_dm and isinstance(ch, discord.TextChannel) and self.owner_id:
             user = interaction.client.get_user(self.owner_id)
             if user:
@@ -1364,7 +1374,7 @@ class TicketCloseConfirmView(discord.ui.View):
             if self.is_dm and self.owner_id in DM_TICKET_CHANNELS:
                 DM_TICKET_CHANNELS.pop(self.owner_id, None)
             try:
-                await ch.delete(reason=f"Ticket closed by {interaction.user}")
+                await ch.delete(reason=f"Ticket closed by {closer}")
             except Exception:
                 pass
 
