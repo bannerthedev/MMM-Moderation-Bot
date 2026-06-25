@@ -1186,7 +1186,6 @@ class DMTicketChannelView(discord.ui.View):
         self.owner_id = owner_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # staff-only buttons
         if is_mod_or_admin(interaction.user):
             return True
         await interaction.response.send_message("Only staff can use these buttons.", ephemeral=True)
@@ -1199,7 +1198,6 @@ class DMTicketChannelView(discord.ui.View):
             await interaction.response.send_message("Not a text channel.", ephemeral=True)
             return
 
-        # 1) Ping staff as plain text so it appears above the embed
         staff_role = interaction.guild.get_role(STAFF_PING_ROLE_ID_MAIN) if interaction.guild else None
         staff_ping = staff_role.mention if staff_role else "@staff"
         try:
@@ -1207,7 +1205,6 @@ class DMTicketChannelView(discord.ui.View):
         except Exception:
             pass
 
-        # 2) Send embed + buttons (Accept / Deny) – no ping in the embed
         embed = discord.Embed(
             title="Close Ticket?",
             description="Staff: do you want to close this DM ticket?",
@@ -1217,18 +1214,15 @@ class DMTicketChannelView(discord.ui.View):
         try:
             await ch.send(embed=embed, view=view)
         except Exception:
-            # fallback if view send fails
             try:
                 await ch.send(embed=embed)
             except Exception:
                 pass
 
-        # Nothing is sent to the user's DM here
         await interaction.response.send_message("Requested ticket close.", ephemeral=True)
 
     @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
     async def ask_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Ask AI is conceptually for the user, but we let staff open instructions too.
         user = interaction.client.get_user(self.owner_id) or interaction.user
         view = TicketAskAIView(for_user=user, is_dm_ticket=True)
         await interaction.response.send_message(
@@ -1236,60 +1230,6 @@ class DMTicketChannelView(discord.ui.View):
             view=view,
             ephemeral=True,
         )
-
-
-class DMTicketChannelView(discord.ui.View):
-    """View for DM ticket channels (staff side)."""
-    def __init__(self, owner_id: int):
-        super().__init__(timeout=None)
-        self.owner_id = owner_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # staff-only buttons
-        if is_mod_or_admin(interaction.user):
-            return True
-        await interaction.response.send_message("Only staff can use these buttons.", ephemeral=True)
-        return False
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger)
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ch = interaction.channel
-        if not isinstance(ch, discord.TextChannel):
-            await interaction.response.send_message("Not a text channel.", ephemeral=True)
-            return
-
-        # ping staff outside embed
-        staff_role = interaction.guild.get_role(STAFF_PING_ROLE_ID_MAIN) if interaction.guild else None
-        staff_ping = staff_role.mention if staff_role else "@staff"
-        try:
-            await ch.send(f"{staff_ping}\ndo you want to close this DM ticket?")
-        except Exception:
-            pass
-
-        embed = discord.Embed(
-            title="Close Ticket?",
-            description="Staff: do you want to close this DM ticket?",
-            color=discord.Color.blue(),
-        )
-        view = TicketCloseConfirmView(channel_id=ch.id, is_dm=True, owner_id=self.owner_id)
-        try:
-            await ch.send(embed=embed, view=view)
-        except Exception:
-            pass
-
-        await interaction.response.send_message("Requested ticket close.", ephemeral=True)
-
-    @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
-    async def ask_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Ask AI is conceptually for the user, but we let staff open instructions too.
-        user = interaction.client.get_user(self.owner_id) or interaction.user
-        view = TicketAskAIView(for_user=user, is_dm_ticket=True)
-        await interaction.response.send_message(
-            "Ask AI instructions sent.",
-            view=view,
-            ephemeral=True,
-        )
-
 
 class TicketCloseConfirmView(discord.ui.View):
     def __init__(self, channel_id: int, is_dm: bool = False, owner_id: Optional[int] = None):
