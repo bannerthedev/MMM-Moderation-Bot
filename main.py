@@ -20,6 +20,12 @@ STAFF_ROLE_ID = 1497662209285689575     # staff role in appeal server (ping + pe
 # ROLES IN MAIN SERVER
 MOD_ROLE_ID = 1339202997208616990       # Mod role ID
 TRIAL_MOD_ROLE_ID = 1374305296326856734 # Trial Mod role ID
+# ---------- Ticket system config ----------
+TICKET_PANEL_CHANNEL_ID = 1407866851714928683  # <- set this to the channel where you want the main ticket panel
+STAFF_PING_ROLE_ID_MAIN = 1516660842782003240  # role to ping in tickets, change if you have a separate @staff role
+
+# user_id -> dm_ticket_channel_id (in main server)
+DM_TICKET_CHANNELS: Dict[int, int] = {}
 
 # MAIN SERVER LOG CHANNEL (for ban/unban/false-ban/kick logs)
 LOG_CHANNEL_ID = 1408472513108770816
@@ -851,6 +857,408 @@ async def on_message(message: discord.Message):
             await thread.send(content=text, files=files)
         except Exception:
             pass
+
+
+
+
+# ============================================================
+#                      Ticket System
+# ============================================================
+
+class TicketAskAIView(discord.ui.View):
+    """Simple Ask AI placeholder: pings staff if user explicitly asks for staff."""
+
+    def __init__(self, for_user: discord.User, is_dm_ticket: bool):
+        super().__init__(timeout=None)
+        self.for_user = for_user
+        self.is_dm_ticket = is_dm_ticket
+
+    @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
+    async def ask_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.for_user.id and not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message("This Ask AI button is not for you.", ephemeral=True)
+            return
+
+        msg = (
+            "You can ask me questions here.\n\n"
+            "If you need a real staff member, say exactly:\n"
+            "`I would like to speak to the staff`\n\n"
+            "When you say that, I will ping staff for you."
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class TicketAddMemberSelect(discord.ui.UserSelect):
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__(
+            placeholder="Select a member to add...",
+            min_values=1,
+            max_values=1,
+        )
+        self.channel = channel
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message("Only staff can add members.", ephemeral=True)
+            return
+
+        member = self.values[0]
+        overwrites = self.channel.overwrites or {}
+        overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        try:
+            await self.channel.edit(overwrites=overwrites)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to add member: `{e}`", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"{member.mention} has been added to this ticket.", ephemeral=True)
+
+
+class TicketChannelView(discord.ui.View):
+    """View for in-server ticket channels."""
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Allow ticket owner + staff
+        if interaction.user.id == self.owner_id or is_mod_or_admin(interaction.user):
+            return True
+        await interaction.response.send_message("You are not allowed to use these buttons.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Add Member", style=discord.ButtonStyle.secondary)
+    async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.channel
+        if not isinstance(ch, discord.TextChannel):
+            await interaction.response.send_message("Not a text channel.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        view.add_item(TicketAddMemberSelect(ch))
+        await interaction.response.send_message("Select a member to add:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger)
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.channel
+        if not isinstance(ch, discord.TextChannel):
+            await interaction.response.send_message("Not a text channel.", ephemeral=True)
+            return
+
+        staff_role = interaction.guild.get_role(STAFF_PING_ROLE_ID_MAIN) if interaction.guild else None
+        staff_ping = staff_role.mention if staff_role else "@staff"
+
+        embed = discord.Embed(
+            title="Close Ticket?",
+            description=f"{staff_ping} do you want to close this ticket?",
+            color=discord.Color.blue(),
+        )
+
+        view = TicketCloseConfirmView(channel_id=ch.id)
+        await ch.send(embed=embed, view=view)
+        await interaction.response.send_message("Requested ticket close.", ephemeral=True)
+
+    @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
+    async def ask_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.guild.get_member(self.owner_id) if interaction.guild else interaction.user
+        view = TicketAskAIView(for_user=user, is_dm_ticket=False)
+        await interaction.response.send_message(
+            "Ask AI opened. Read the instructions below.",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class DMTicketChannelView(discord.ui.View):
+    """View for DM ticket channels (staff side)."""
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # staff-only buttons
+        if is_mod_or_admin(interaction.user):
+            return True
+        await interaction.response.send_message("Only staff can use these buttons.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger)
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.channel
+        if not isinstance(ch, discord.TextChannel):
+            await interaction.response.send_message("Not a text channel.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="Close Ticket?",
+            description="Staff: do you want to close this DM ticket?",
+            color=discord.Color.blue(),
+        )
+        view = TicketCloseConfirmView(channel_id=ch.id, is_dm=True, owner_id=self.owner_id)
+        await ch.send(embed=embed, view=view)
+        await interaction.response.send_message("Requested ticket close.", ephemeral=True)
+
+    @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
+    async def ask_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ask AI is conceptually for the user, but we let staff open instructions too.
+        user = interaction.client.get_user(self.owner_id) or interaction.user
+        view = TicketAskAIView(for_user=user, is_dm_ticket=True)
+        await interaction.response.send_message(
+            "Ask AI instructions sent.",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class TicketCloseConfirmView(discord.ui.View):
+    def __init__(self, channel_id: int, is_dm: bool = False, owner_id: Optional[int] = None):
+        super().__init__(timeout=120)
+        self.channel_id = channel_id
+        self.is_dm = is_dm
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message("Only staff can confirm closing.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.client.get_channel(self.channel_id)
+        if isinstance(ch, discord.TextChannel):
+            if self.is_dm and self.owner_id in DM_TICKET_CHANNELS:
+                DM_TICKET_CHANNELS.pop(self.owner_id, None)
+            try:
+                await ch.delete(reason=f"Ticket closed by {interaction.user}")
+            except Exception:
+                pass
+        await interaction.response.send_message("Ticket closed.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.secondary)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Ticket close cancelled.", ephemeral=True)
+        self.stop()
+
+
+class TicketLocationView(discord.ui.View):
+    """Second step: In Server / DM."""
+    def __init__(self, dm_category_id: int, server_category_id: int, ticket_type: str):
+        super().__init__(timeout=120)
+        self.dm_category_id = dm_category_id
+        self.server_category_id = server_category_id
+        self.ticket_type = ticket_type
+
+    async def _create_server_ticket(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            return
+        cat = guild.get_channel(self.server_category_id)
+        if not isinstance(cat, discord.CategoryChannel):
+            await interaction.response.send_message("In-server ticket category not found.", ephemeral=True)
+            return
+
+        user = interaction.user
+        name_base = f"ticket-{user.name}".lower().replace(" ", "-")
+        channel_name = name_base[:90]
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+
+        # allow staff roles
+        if MOD_ROLE_ID:
+            r = guild.get_role(MOD_ROLE_ID)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        if TRIAL_MOD_ROLE_ID:
+            r = guild.get_role(TRIAL_MOD_ROLE_ID)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        ch = await guild.create_text_channel(
+            name=channel_name,
+            category=cat,
+            overwrites=overwrites,
+            reason=f"{self.ticket_type} ticket for {user}",
+        )
+
+        embed = discord.Embed(
+            title=f"{self.ticket_type} Ticket",
+            description="Please give the staff your question and all relevant information.",
+            color=discord.Color.blue(),
+        )
+        await ch.send(embed=embed, view=TicketChannelView(owner_id=user.id))
+        await interaction.response.send_message(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+
+    async def _create_dm_ticket(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            return
+        cat = guild.get_channel(self.dm_category_id)
+        if not isinstance(cat, discord.CategoryChannel):
+            await interaction.response.send_message("DM ticket category not found.", ephemeral=True)
+            return
+
+        user = interaction.user
+        name_base = f"dm-{user.name}".lower().replace(" ", "-")
+        channel_name = name_base[:90]
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        # staff roles only (DM ticket is between user & staff)
+        if MOD_ROLE_ID:
+            r = guild.get_role(MOD_ROLE_ID)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        if TRIAL_MOD_ROLE_ID:
+            r = guild.get_role(TRIAL_MOD_ROLE_ID)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        ch = await guild.create_text_channel(
+            name=channel_name,
+            category=cat,
+            overwrites=overwrites,
+            reason=f"DM {self.ticket_type} ticket for {user}",
+        )
+
+        # map user -> channel
+        DM_TICKET_CHANNELS[user.id] = ch.id
+
+        # send first message in ticket channel (staff side)
+        embed = discord.Embed(
+            title=f"{self.ticket_type} DM Ticket",
+            description="This channel relays messages between staff and the user via DMs.",
+            color=discord.Color.blue(),
+        )
+        await ch.send(embed=embed, view=DMTicketChannelView(owner_id=user.id))
+
+        # DM user
+        try:
+            dm_embed = discord.Embed(
+                title=f"{self.ticket_type} Ticket",
+                description=(
+                    f"{user.mention}\n"
+                    "This ticket is for you and the staff to talk and help you out.\n"
+                    "You can send messages here and they will be seen by staff."
+                ),
+                color=discord.Color.blue(),
+            )
+            await user.send(embed=dm_embed)
+        except Exception:
+            pass
+
+        await interaction.response.send_message("Your DM ticket has been created. Check your DMs.", ephemeral=True)
+
+    @discord.ui.button(label="In Server", style=discord.ButtonStyle.success)
+    async def in_server(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create_server_ticket(interaction)
+
+    @discord.ui.button(label="DM", style=discord.ButtonStyle.secondary)
+    async def dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create_dm_ticket(interaction)
+
+
+class TicketTypeView(discord.ui.View):
+    """Main panel: Website Help / General Help / Report A Player."""
+    def __init__(self, dm_category_id: int, server_category_id: int):
+        super().__init__(timeout=None)
+        self.dm_category_id = dm_category_id
+        self.server_category_id = server_category_id
+
+    async def _send_location_choice(self, interaction: discord.Interaction, ticket_type: str):
+        embed = discord.Embed(
+            title=f"{ticket_type} Ticket",
+            description="What would you like:",
+            color=discord.Color.blue(),
+        )
+        view = TicketLocationView(
+            dm_category_id=self.dm_category_id,
+            server_category_id=self.server_category_id,
+            ticket_type=ticket_type,
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Website Help", style=discord.ButtonStyle.primary)
+    async def website_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_location_choice(interaction, "Website Help")
+
+    @discord.ui.button(label="General Help", style=discord.ButtonStyle.primary)
+    async def general_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_location_choice(interaction, "General Help")
+
+    @discord.ui.button(label="Report A Player", style=discord.ButtonStyle.danger)
+    async def report_player(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_location_choice(interaction, "Report A Player")
+
+
+@bot.tree.command(
+    name="create-ticket",
+    description="Create the main ticket message (admins only).",
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+@app_commands.describe(
+    dm_category="Category where DM tickets are created (server side)",
+    in_server_category="Category where in-server tickets are created",
+)
+async def create_ticket(
+    interaction: discord.Interaction,
+    dm_category: discord.CategoryChannel,
+    in_server_category: discord.CategoryChannel,
+):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("Use this in the main server.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True)
+        return
+
+    # choose target channel
+    target_ch = bot.get_channel(TICKET_PANEL_CHANNEL_ID)
+    if not isinstance(target_ch, discord.TextChannel):
+        target_ch = interaction.channel
+
+    # main info embed (blue)
+    desc = (
+        "Community Support and Report Ticket Bot.\n"
+        "❌ Misuse of Tickets will result in Punishment ❌\n"
+        "- 1st Offense - Warning\n"
+        "- 2nd Offense - Timeout (1 Day - 1 Week)\n"
+        "- 3rd Offense - Timeout Again (Double The Previous)\n"
+        "- 4th Offense - Stacking 1 Month Bans\n\n"
+        "Open the ticket type that fits your issue best. Please read the Terms of Service before opening any ticket.\n"
+        "Before opening any ticket, know what you want.\n\n"
+        "**Website Help** – This is for helping with the website or with other stuff according to the website.\n"
+        "**General Help** – Get help with general questions or issues.\n"
+        "**Report A Player** – Report a player for breaking the rules. You can send links, videos, and photos as evidence.\n"
+    )
+    embed = discord.Embed(
+        title="Ticket System",
+        description=desc,
+        color=discord.Color.blue(),
+    )
+
+    view = TicketTypeView(dm_category_id=dm_category.id, server_category_id=in_server_category.id)
+
+    try:
+        await target_ch.send(embed=embed, view=view)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to send ticket panel: `{e}`", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Ticket panel created in {target_ch.mention}.",
+        ephemeral=True,
+    )
+
+
+
+
 
 
 # create the group (no guild arg)
