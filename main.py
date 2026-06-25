@@ -1,15 +1,19 @@
+import os
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-import os
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from openai import AsyncOpenAI  # <-- new
 
 load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ------------ IDs / CONSTANTS ------------
 MAIN_GUILD_ID = 1338455645896310784   # main server ID
@@ -77,6 +81,55 @@ intents.message_content = True  # enable in Developer Portal as well
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- Shared helpers ----------
+
+async def generate_ticket_ai_reply(message: discord.Message) -> str:
+    """
+    Use OpenAI to generate a reply as 'MMM Assistant' for ticket conversations.
+    """
+    if not OPENAI_API_KEY:
+        # Fallback if no key configured
+        return (
+            "MMM Assistant here.\n"
+            "AI responses are not fully set up yet, but I’m online.\n"
+            "If you need staff, you can say: `I would like to speak to the staff`."
+        )
+
+    user_text = message.content or ""
+    channel_name = getattr(message.channel, "name", "unknown-channel")
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",  # or any other model you prefer
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are MMM Assistant, a helpful support agent inside a Discord ticket system "
+                        "for a Gorilla Tag esports community. Be concise, friendly, and clear. "
+                        "Answer questions about rules, tickets, moderation, and general help.\n\n"
+                        "If the user appears to need real moderation/staff intervention, gently suggest "
+                        "they can say: 'I would like to speak to the staff' – but do NOT ping staff yourself. "
+                        "A separate part of the bot will handle that phrase."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"(Channel: {channel_name}, User: {message.author} #{message.author.id})\n\n"
+                        f"{user_text}"
+                    ),
+                },
+            ],
+            temperature=0.4,
+            max_tokens=300,
+        )
+        return resp.choices[0].message.content.strip() if resp.choices else "MMM Assistant: I’m here if you need help."
+    except Exception:
+        return "MMM Assistant: I had trouble generating a response just now. Please try again or ask staff if it’s urgent."
+
+
+
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -644,7 +697,7 @@ async def on_message(message: discord.Message):
         if is_ticket_channel:
             content_low = (message.content or "").lower()
 
-            # user asks to speak to staff
+            # 1) user asks to speak to staff (this is the ONLY place we ping staff)
             if "i would like to speak to the staff" in content_low:
                 staff_role = message.guild.get_role(STAFF_PING_ROLE_ID_MAIN) or message.guild.get_role(MOD_ROLE_ID)
                 staff_ping = staff_role.mention if staff_role else "@staff"
@@ -653,15 +706,9 @@ async def on_message(message: discord.Message):
                 except Exception:
                     pass
 
-            # user mentions the bot -> AI helper text
+            # 2) user mentions the bot -> real AI reply from MMM Assistant
             if bot.user and bot.user in message.mentions:
-                ai_reply = (
-                    "Hello, I'm the ticket assistant.\n\n"
-                    "You can ask me questions here like a normal chat. "
-                    "If you need a real staff member, type:\n"
-                    "`I would like to speak to the staff`\n"
-                    "and I will ping staff for you."
-                )
+                ai_reply = await generate_ticket_ai_reply(message)
                 try:
                     await ch.send(ai_reply)
                 except Exception:
