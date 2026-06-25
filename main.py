@@ -693,75 +693,56 @@ async def manage_ticket(
         await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True)
         return
 
-    # find target channel (panel)
     panel_ch = bot.get_channel(TICKET_PANEL_CHANNEL_ID) or interaction.channel
     if not isinstance(panel_ch, discord.TextChannel):
         await interaction.response.send_message("Ticket panel channel not found.", ephemeral=True)
         return
 
-    # helper: rebuild TicketTypeView with a map of which buttons are disabled
-    def build_view(disabled_map: Dict[str, bool]) -> discord.ui.View:
-        v = TicketTypeView(dm_category_id=0, server_category_id=0)  # dm/server ids not used for rendering buttons here
-        # find children and set disabled based on label
-        for child in v.children:
-            try:
-                lbl = getattr(child, "label", "") or ""
-            except Exception:
-                lbl = ""
-            if lbl in disabled_map:
-                child.disabled = disabled_map[lbl]
-        return v
-
-    # determine desired disabled state for each label
-    desired_disabled = {
-        "Website Help": False,
-        "General Help": False,
-        "Report A Player": False,
-    }
     target_label = ticket_type.value
-    if action.value == "close":
-        desired_disabled[target_label] = True
-    else:
-        desired_disabled[target_label] = False
+    should_disable = (action.value == "close")
+    updated_any = False
 
-    # Search recent messages in panel channel sent by this bot that contain the TicketTypeView (by embed title)
-    found = False
     try:
         async for msg in panel_ch.history(limit=200):
             if msg.author.id != bot.user.id:
                 continue
-            # prefer messages with embed title "Ticket System"
             emb = msg.embeds[0] if msg.embeds else None
             if not emb or (emb.title or "").lower() != "ticket system":
                 continue
-            # Build new view according to desired_disabled mapping
-            new_view = build_view(desired_disabled)
+
+            # Load existing view from the message (keeps original dm/server category IDs)
             try:
-                await msg.edit(view=new_view)
-                found = True
+                view = discord.ui.View.from_message(msg)
             except Exception:
-                # best-effort; continue to other messages
+                continue
+
+            changed = False
+            for child in view.children:
+                if isinstance(child, discord.ui.Button) and (child.label or "") == target_label:
+                    child.disabled = should_disable
+                    changed = True
+
+            if not changed:
+                continue
+
+            try:
+                await msg.edit(view=view)
+                updated_any = True
+            except Exception:
                 continue
     except Exception:
         pass
 
-    if found:
-        await interaction.response.send_message(f"{action.name}d ticket type `{target_label}` on ticket panel.", ephemeral=True)
-    else:
-        # If no existing panel message found, send a new panel reflecting the requested state
-        desc = (
-            "Community Support and Report Ticket Bot.\n\n"
-            "**Website Help** – This is for helping with the website.\n"
-            "**General Help** – Get help with general questions or issues.\n"
-            "**Report A Player** – Report a player for breaking the rules.\n"
+    if updated_any:
+        await interaction.response.send_message(
+            f"{'Closed' if should_disable else 'Opened'} ticket type `{target_label}` on the ticket panel.",
+            ephemeral=True,
         )
-        embed = discord.Embed(title="Ticket System", description=desc, color=discord.Color.blue())
-        new_view = build_view(desired_disabled)
-        try:
-            await panel_ch.send(embed=embed, view=new_view)
-            await interaction.response.send_message(f"Posted new ticket panel with `{target_label}` {action.name}d.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"Failed to update/create ticket panel: {e}", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "Could not find an existing ticket panel message to update.",
+            ephemeral=True,
+        )
 
 
 
