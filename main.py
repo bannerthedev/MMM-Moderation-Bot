@@ -1288,6 +1288,7 @@ class TicketLocationView(discord.ui.View):
         if guild is None:
             await interaction.response.send_message("Use this in a server.", ephemeral=True)
             return
+
         cat = guild.get_channel(self.server_category_id)
         if not isinstance(cat, discord.CategoryChannel):
             await interaction.response.send_message("In-server ticket category not found.", ephemeral=True)
@@ -1296,18 +1297,17 @@ class TicketLocationView(discord.ui.View):
         user = interaction.user
         name_base = f"ticket-{user.name}".lower().replace(" ", "-")
         channel_name = name_base[:90]
+
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
 
         # allow staff roles
-        if MOD_ROLE_ID:
-            r = guild.get_role(MOD_ROLE_ID)
-            if r:
-                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        if TRIAL_MOD_ROLE_ID:
-            r = guild.get_role(TRIAL_MOD_ROLE_ID)
+        for rid in (MOD_ROLE_ID, TRIAL_MOD_ROLE_ID):
+            if not rid:
+                continue
+            r = guild.get_role(rid)
             if r:
                 overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
@@ -1331,6 +1331,7 @@ class TicketLocationView(discord.ui.View):
         if guild is None:
             await interaction.response.send_message("Use this in a server.", ephemeral=True)
             return
+
         cat = guild.get_channel(self.dm_category_id)
         if not isinstance(cat, discord.CategoryChannel):
             await interaction.response.send_message("DM ticket category not found.", ephemeral=True)
@@ -1344,12 +1345,10 @@ class TicketLocationView(discord.ui.View):
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
         }
         # staff roles only (DM ticket is between user & staff)
-        if MOD_ROLE_ID:
-            r = guild.get_role(MOD_ROLE_ID)
-            if r:
-                overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        if TRIAL_MOD_ROLE_ID:
-            r = guild.get_role(TRIAL_MOD_ROLE_ID)
+        for rid in (MOD_ROLE_ID, TRIAL_MOD_ROLE_ID):
+            if not rid:
+                continue
+            r = guild.get_role(rid)
             if r:
                 overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
@@ -1363,15 +1362,29 @@ class TicketLocationView(discord.ui.View):
         # map user -> channel
         DM_TICKET_CHANNELS[user.id] = ch.id
 
-        # send first message in ticket channel (staff side)
+        # 1) staff ping above the embed
+        staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
+        staff_ping = staff_role.mention if staff_role else "@staff"
+        try:
+            await ch.send(staff_ping)
+        except Exception:
+            pass
+
+        # 2) embed + buttons in staff channel
         embed = discord.Embed(
             title=f"{self.ticket_type} DM Ticket",
             description="This channel relays messages between staff and the user via DMs.",
             color=discord.Color.blue(),
         )
-        await ch.send(embed=embed, view=DMTicketChannelView(owner_id=user.id))
+        try:
+            await ch.send(embed=embed, view=DMTicketChannelView(owner_id=user.id))
+        except Exception:
+            try:
+                await ch.send(embed=embed)
+            except Exception:
+                pass
 
-        # DM user
+        # 3) DM the user (no buttons)
         try:
             dm_embed = discord.Embed(
                 title=f"{self.ticket_type} Ticket",
@@ -1395,6 +1408,7 @@ class TicketLocationView(discord.ui.View):
     @discord.ui.button(label="DM", style=discord.ButtonStyle.secondary)
     async def dm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._create_dm_ticket(interaction)
+
 
 
 class TicketTypeView(discord.ui.View):
