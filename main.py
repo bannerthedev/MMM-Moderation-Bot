@@ -1162,13 +1162,25 @@ class DMTicketChannelView(discord.ui.View):
             await interaction.response.send_message("Not a text channel.", ephemeral=True)
             return
 
+        # ping staff outside embed
+        staff_role = interaction.guild.get_role(STAFF_PING_ROLE_ID_MAIN) if interaction.guild else None
+        staff_ping = staff_role.mention if staff_role else "@staff"
+        try:
+            await ch.send(f"{staff_ping}\ndo you want to close this DM ticket?")
+        except Exception:
+            pass
+
         embed = discord.Embed(
             title="Close Ticket?",
             description="Staff: do you want to close this DM ticket?",
             color=discord.Color.blue(),
         )
         view = TicketCloseConfirmView(channel_id=ch.id, is_dm=True, owner_id=self.owner_id)
-        await ch.send(embed=embed, view=view)
+        try:
+            await ch.send(embed=embed, view=view)
+        except Exception:
+            pass
+
         await interaction.response.send_message("Requested ticket close.", ephemeral=True)
 
     @discord.ui.button(label="Ask AI", style=discord.ButtonStyle.primary)
