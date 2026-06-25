@@ -54,9 +54,6 @@ BAD_WORDS = [
     "stfu","b1tch", "a$$", "jew",
 ]
 
-
-
-
 # ---- Automod master switch (runtime toggle) ----
 AUTOMOD_ENABLED = False  # False = OFF, True = ON
 
@@ -83,52 +80,40 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ---------- Shared helpers ----------
 
 async def generate_ticket_ai_reply(message: discord.Message) -> str:
-    """
-    Use OpenAI to generate a reply as 'MMM Assistant' for ticket conversations.
-    """
     if not OPENAI_API_KEY:
-        # Fallback if no key configured
-        return (
-            "MMM Assistant here.\n"
-            "AI responses are not fully set up yet, but I’m online.\n"
-            "If you need staff, you can say: `I would like to speak to the staff`."
-        )
+        return "MMM Assistant here. AI not configured."
 
     user_text = message.content or ""
     channel_name = getattr(message.channel, "name", "unknown-channel")
 
-    try:
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # or any other model you prefer
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are MMM Assistant, a helpful support agent inside a Discord ticket system "
-                        "for a Gorilla Tag esports community. Be concise, friendly, and clear. "
-                        "Answer questions about rules, tickets, moderation, and general help.\n\n"
-                        "If the user appears to need real moderation/staff intervention, gently suggest "
-                        "they can say: 'I would like to speak to the staff' – but do NOT ping staff yourself. "
-                        "A separate part of the bot will handle that phrase."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"(Channel: {channel_name}, User: {message.author} #{message.author.id})\n\n"
-                        f"{user_text}"
-                    ),
-                },
-            ],
-            temperature=0.4,
-            max_tokens=300,
-        )
-        return resp.choices[0].message.content.strip() if resp.choices else "MMM Assistant: I’m here if you need help."
-    except Exception:
-        return "MMM Assistant: I had trouble generating a response just now. Please try again or ask staff if it’s urgent."
+    system_prompt = (
+        "You are MMM Assistant, a helpful support agent inside a Discord ticket system..."
+    )
 
+    models = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]  # try highest first, then fallback
 
+    for model in models:
+        try:
+            resp = await openai_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"(Channel: {channel_name})\n\n{user_text}"},
+                ],
+                temperature=0.4,
+                max_tokens=300,
+            )
+            if resp and getattr(resp, "choices", None):
+                return resp.choices[0].message.content.strip()
+        except Exception as e:
+            # log if you want, then try next model
+            try:
+                print(f"Model {model} failed: {e}")
+            except Exception:
+                pass
+            continue
 
+    return "MMM Assistant: I had trouble generating a response right now. Please try again or ask staff."
 
 
 def now_utc() -> datetime:
@@ -673,6 +658,112 @@ async def submit_report(interaction: discord.Interaction):
         view=view,
         ephemeral=True,
     )
+
+
+
+@bot.tree.command(
+    name="manage-ticket",
+    description="Admin: open/close a ticket type on the ticket panel.",
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+@app_commands.describe(
+    action="Open or Close the ticket type",
+    ticket_type="Which ticket type to manage",
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Open", value="open"),
+        app_commands.Choice(name="Close", value="close"),
+    ],
+    ticket_type=[
+        app_commands.Choice(name="Website Help", value="Website Help"),
+        app_commands.Choice(name="General Help", value="General Help"),
+        app_commands.Choice(name="Report A Player", value="Report A Player"),
+    ],
+)
+async def manage_ticket(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    ticket_type: app_commands.Choice[str],
+):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("Use this in the main server.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You must be an administrator to use this command.", ephemeral=True)
+        return
+
+    # find target channel (panel)
+    panel_ch = bot.get_channel(TICKET_PANEL_CHANNEL_ID) or interaction.channel
+    if not isinstance(panel_ch, discord.TextChannel):
+        await interaction.response.send_message("Ticket panel channel not found.", ephemeral=True)
+        return
+
+    # helper: rebuild TicketTypeView with a map of which buttons are disabled
+    def build_view(disabled_map: Dict[str, bool]) -> discord.ui.View:
+        v = TicketTypeView(dm_category_id=0, server_category_id=0)  # dm/server ids not used for rendering buttons here
+        # find children and set disabled based on label
+        for child in v.children:
+            try:
+                lbl = getattr(child, "label", "") or ""
+            except Exception:
+                lbl = ""
+            if lbl in disabled_map:
+                child.disabled = disabled_map[lbl]
+        return v
+
+    # determine desired disabled state for each label
+    desired_disabled = {
+        "Website Help": False,
+        "General Help": False,
+        "Report A Player": False,
+    }
+    target_label = ticket_type.value
+    if action.value == "close":
+        desired_disabled[target_label] = True
+    else:
+        desired_disabled[target_label] = False
+
+    # Search recent messages in panel channel sent by this bot that contain the TicketTypeView (by embed title)
+    found = False
+    try:
+        async for msg in panel_ch.history(limit=200):
+            if msg.author.id != bot.user.id:
+                continue
+            # prefer messages with embed title "Ticket System"
+            emb = msg.embeds[0] if msg.embeds else None
+            if not emb or (emb.title or "").lower() != "ticket system":
+                continue
+            # Build new view according to desired_disabled mapping
+            new_view = build_view(desired_disabled)
+            try:
+                await msg.edit(view=new_view)
+                found = True
+            except Exception:
+                # best-effort; continue to other messages
+                continue
+    except Exception:
+        pass
+
+    if found:
+        await interaction.response.send_message(f"{action.name}d ticket type `{target_label}` on ticket panel.", ephemeral=True)
+    else:
+        # If no existing panel message found, send a new panel reflecting the requested state
+        desc = (
+            "Community Support and Report Ticket Bot.\n\n"
+            "**Website Help** – This is for helping with the website.\n"
+            "**General Help** – Get help with general questions or issues.\n"
+            "**Report A Player** – Report a player for breaking the rules.\n"
+        )
+        embed = discord.Embed(title="Ticket System", description=desc, color=discord.Color.blue())
+        new_view = build_view(desired_disabled)
+        try:
+            await panel_ch.send(embed=embed, view=new_view)
+            await interaction.response.send_message(f"Posted new ticket panel with `{target_label}` {action.name}d.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to update/create ticket panel: {e}", ephemeral=True)
+
+
 
 
 # ============================================================
