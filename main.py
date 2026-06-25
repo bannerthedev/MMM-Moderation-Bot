@@ -1352,6 +1352,7 @@ class TicketLocationView(discord.ui.View):
             if r:
                 overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
+        # create staff-side DM ticket channel
         ch = await guild.create_text_channel(
             name=channel_name,
             category=cat,
@@ -1362,7 +1363,7 @@ class TicketLocationView(discord.ui.View):
         # map user -> channel
         DM_TICKET_CHANNELS[user.id] = ch.id
 
-        # 1) staff ping above the embed
+        # 1) staff ping ABOVE the embed in staff channel
         staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
         staff_ping = staff_role.mention if staff_role else "@staff"
         try:
@@ -1371,25 +1372,28 @@ class TicketLocationView(discord.ui.View):
             pass
 
         # 2) embed + buttons in staff channel
-        embed = discord.Embed(
+        embed_staff = discord.Embed(
             title=f"{self.ticket_type} DM Ticket",
             description="This channel relays messages between staff and the user via DMs.",
             color=discord.Color.blue(),
         )
         try:
-            await ch.send(embed=embed, view=DMTicketChannelView(owner_id=user.id))
+            await ch.send(embed=embed_staff, view=DMTicketChannelView(owner_id=user.id))
         except Exception:
             try:
-                await ch.send(embed=embed)
+                await ch.send(embed=embed_staff)
             except Exception:
                 pass
 
-        # 3) DM the user (no buttons)
+        # 3) DM to user: ping above embed, NO buttons
         try:
+            # plain ping first
+            await user.send(user.mention)
+
+            # then embed without mention
             dm_embed = discord.Embed(
                 title=f"{self.ticket_type} Ticket",
                 description=(
-                    f"{user.mention}\n"
                     "This ticket is for you and the staff to talk and help you out.\n"
                     "You can send messages here and they will be seen by staff."
                 ),
