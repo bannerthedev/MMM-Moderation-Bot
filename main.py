@@ -1926,10 +1926,111 @@ class AgreementView(discord.ui.View):
 
 
 class StaffDecisionView(discord.ui.View):
-    # Placeholder so your AppealModal can instantiate it; implement your real buttons here
     def __init__(self, target_user_id: int, timeout: Optional[float] = None):
         super().__init__(timeout=timeout)
         self.target_user_id = target_user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only staff in the appeal server (STAFF_ROLE_ID) or admins can use these buttons
+        if interaction.guild and interaction.guild.id == APPEAL_GUILD_ID:
+            staff_role = interaction.guild.get_role(STAFF_ROLE_ID)
+            if isinstance(interaction.user, discord.Member):
+                if staff_role and staff_role in interaction.user.roles:
+                    return True
+                if interaction.user.guild_permissions.administrator:
+                    return True
+
+        await interaction.response.send_message(
+            "You are not allowed to make decisions on appeals.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        target_id = self.target_user_id
+
+        # Try to unban from main guild
+        main_guild = interaction.client.get_guild(MAIN_GUILD_ID)
+        if main_guild is not None:
+            try:
+                await main_guild.unban(discord.Object(id=target_id), reason="Appeal accepted")
+            except discord.NotFound:
+                # user not banned anymore – just ignore
+                pass
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"Failed to unban user in main server: `{e}`",
+                    ephemeral=True,
+                )
+                return
+
+        # Clean up appeal state
+        active_appeals.pop(target_id, None)
+        if target_id in pending_appeal_queue:
+            pending_appeal_queue.remove(target_id)
+
+        # DM user
+        user = interaction.client.get_user(target_id)
+        if user is None:
+            try:
+                user = await interaction.client.fetch_user(target_id)
+            except Exception:
+                user = None
+
+        if user is not None:
+            try:
+                embed = discord.Embed(
+                    title="You Have Been Unban.",
+                    description=f"Here is the main server [Main Server]({MAIN_SERVER_INVITE})",
+                    color=discord.Color.green(),
+                )
+                # mention + embed
+                await user.send(user.mention, embed=embed)
+            except Exception:
+                pass
+
+        # Confirm in the appeal channel / thread
+        await interaction.response.send_message(
+            f"✅ Appeal **accepted** for <@{target_id}>.",
+            ephemeral=False,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        target_id = self.target_user_id
+
+        # Clean up appeal state
+        active_appeals.pop(target_id, None)
+        if target_id in pending_appeal_queue:
+            pending_appeal_queue.remove(target_id)
+
+        # DM user
+        user = interaction.client.get_user(target_id)
+        if user is None:
+            try:
+                user = await interaction.client.fetch_user(target_id)
+            except Exception:
+                user = None
+
+        if user is not None:
+            try:
+                embed = discord.Embed(
+                    title="You're Appeal As Been denied.",
+                    description="You're Appeal As Been denied.",
+                    color=discord.Color.red(),
+                )
+                await user.send(user.mention, embed=embed)
+            except Exception:
+                pass
+
+        # Confirm in the appeal channel / thread
+        await interaction.response.send_message(
+            f"❌ Appeal **denied** for <@{target_id}>.",
+            ephemeral=False,
+        )
+        self.stop()
 
 
 class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
