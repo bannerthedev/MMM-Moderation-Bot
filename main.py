@@ -2476,14 +2476,28 @@ async def tickets_create_handler(request: web.Request):
 
 
 # ---------- on_ready (ensure only one on_ready exists) ----------
+# start aiohttp web server for /ai/reply and /tickets/create
+async def start_web_api():
+    app = web.Application()
+    app.router.add_post("/ai/reply", ai_reply_handler)
+    app.router.add_post("/tickets/create", tickets_create_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web API running on 0.0.0.0:{port}")
+
+# schedule startup in on_ready
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+    # existing sync code...
     main_guild = discord.Object(id=MAIN_GUILD_ID)
     bot.tree.copy_global_to(guild=main_guild)
     await bot.tree.sync(guild=main_guild)
-
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
     bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
@@ -2493,6 +2507,12 @@ async def on_ready():
             temp_ban_watcher.start()
     except Exception:
         pass
+
+    # start web API once
+    try:
+        bot.loop.create_task(start_web_api())
+    except Exception as e:
+        print("Failed to start web API:", e)
 
     print("Slash commands synced for main and appeal guilds.")
 
