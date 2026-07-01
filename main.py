@@ -3,6 +3,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 from zoneinfo import ZoneInfo
+from aiohttp import web
+import json
 
 import discord
 from discord import app_commands
@@ -2314,6 +2316,163 @@ async def temp_ban_watcher():
                     pass
         except Exception:
             pass
+
+
+
+
+
+
+# ---------- Minimal HTTP API (ai reply + ticket create) ----------
+# Requires aiohttp import and that bot is running with intents
+
+async def ai_reply_handler(request: web.Request):
+    """POST /ai/reply
+    body: { session_id, message, topic }
+    returns: { reply: "..." }
+    """
+    try:
+        data = await request.json()
+        user_msg = data.get("message", "")
+        topic = data.get("topic", "general")
+    except Exception:
+        return web.json_response({"reply": "Invalid request"}, status=400)
+
+    # Use the same logic you use in generate_ticket_ai_reply but simplified:
+    if not OPENAI_API_KEY:
+        return web.json_response({"reply": "MMM Assistant here. AI not configured."})
+
+    system_prompt = (
+        "You are MMM Assistant, a helpful support agent inside a Discord ticket system. "
+        "Be concise and helpful. If user asks to speak to staff, instruct them to say "
+        "\"I would like to speak to the staff\" and do not automatically ping."
+    )
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"(Topic: {topic})\n\n{user_msg}"},
+            ],
+            temperature=0.4,
+            max_tokens=400,
+        )
+        reply = resp.choices[0].message.content.strip()
+    except Exception as e:
+        print("AI reply error:", e)
+        reply = "MMM Assistant: I had trouble generating a response right now. Please try again later."
+
+    return web.json_response({"reply": reply})
+
+
+async def tickets_create_handler(request: web.Request):
+    """
+    POST /tickets/create
+    body: { session_id, user_name, user_id (optional), reason, transcript }
+    Creates a DM-style ticket channel in main guild (root, visible only to staff) and returns { success, ticket_id }.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "invalid_json"}, status=400)
+
+    user_id = data.get("user_id")
+    user_name = (data.get("user_name") or "webuser").strip()[:50]
+    reason = data.get("reason", "No reason provided.")
+    transcript = data.get("transcript", "")
+
+    guild = bot.get_guild(MAIN_GUILD_ID)
+    if guild is None:
+        return web.json_response({"success": False, "error": "guild_not_found"}, status=500)
+
+    # Build a safe short channel name
+    safe_name = "".join(c for c in user_name.lower() if c.isalnum() or c in ("-", "_")).strip()[:20] or "web"
+    chan_name = f"dm-{safe_name}-{int(datetime.utcnow().timestamp()) % 10000}"
+
+    # Permission overwrites: hide from @everyone, allow only staff roles and the bot
+    overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+
+    staff_role_ids = [STAFF_PING_ROLE_ID_MAIN, MOD_ROLE_ID, TRIAL_MOD_ROLE_ID]
+    # add staff roles (unique)
+    for rid in dict.fromkeys(staff_role_ids):
+        if not rid:
+            continue
+        r = guild.get_role(rid)
+        if r:
+            overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    # ensure bot has full perms (bot member)
+    bot_member = guild.me or guild.get_member(bot.user.id)
+    if bot_member:
+        overwrites[bot_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
+
+    # Create the staff-only channel at root (no category)
+    try:
+        ch = await guild.create_text_channel(
+            name=chan_name,
+            overwrites=overwrites,
+            reason=f"Web DM ticket for {user_name}"
+        )
+    except Exception as e:
+        print("Failed to create DM ticket channel:", e)
+        return web.json_response({"success": False, "error": "create_channel_failed"}, status=500)
+
+    # Save mapping so DM messages can be relayed if you want to link later
+    try:
+        if user_id:
+            try:
+                uid = int(user_id)
+                DM_TICKET_CHANNELS[uid] = ch.id
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Compose initial staff message (include transcript if present)
+    try:
+        staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
+        staff_ping = staff_role.mention if staff_role else ""
+        intro_lines = [
+            f"**New web DM-ticket**",
+            f"**User:** {user_name}" + (f" (ID: {user_id})" if user_id else ""),
+            f"**Reason:** {reason}",
+        ]
+        intro = "\n".join(intro_lines)
+        await ch.send(f"{staff_ping}\n{intro}")
+        if transcript:
+            trimmed = transcript[:1900]
+            await ch.send(f"**Transcript (truncated):**\n{trimmed}")
+    except Exception:
+        pass
+
+    # DM the user with a note telling them staff will DM them in the server
+    if user_id:
+        try:
+            uid = int(user_id)
+            try:
+                user_obj = await bot.fetch_user(uid)
+            except Exception:
+                user_obj = bot.get_user(uid)
+            if user_obj:
+                dm_lines = [
+                    f"Hello {user_name},",
+                    "Your support request has been received by MMM Staff.",
+                    "Staff will respond in the private staff ticket channel on the server shortly.",
+                    "If you want to send more info, reply here and staff will see it."
+                ]
+                try:
+                    await user_obj.send("\n".join(dm_lines))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Return success + created channel id
+    resp = web.json_response({"success": True, "ticket_id": str(ch.id)})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 
 
 # ---------- on_ready (ensure only one on_ready exists) ----------
