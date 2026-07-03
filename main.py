@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI  # <-- new
 # session_id -> list of {from, text, ts}
 WEB_TICKETS: dict[str, list[dict]] = {}
+def store_web_message(session_id: str, who: str, text: str): ...
 
 load_dotenv()
 
@@ -2348,15 +2349,27 @@ async def ai_reply_handler(request: web.Request):
     """
     try:
         data = await request.json()
-        user_msg = data.get("message", "")
+        session_id = data.get("session_id") or "unknown"
+        user_msg = data.get("message", "") or ""
         topic = data.get("topic", "general")
     except Exception:
         resp = web.json_response({"reply": "Invalid request"}, status=400)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
+    # store user message in web ticket history
+    try:
+        store_web_message(session_id, "user", user_msg)
+    except Exception:
+        pass
+
     if not OPENAI_API_KEY:
-        resp = web.json_response({"reply": "MMM Assistant here. AI not configured."})
+        reply = "MMM Assistant here. AI not configured."
+        try:
+            store_web_message(session_id, "assistant", reply)
+        except Exception:
+            pass
+        resp = web.json_response({"reply": reply})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
@@ -2380,6 +2393,12 @@ async def ai_reply_handler(request: web.Request):
     except Exception as e:
         print("AI reply error:", e)
         reply = "MMM Assistant: I had trouble generating a response right now. Please try again later."
+
+    # store assistant reply in history
+    try:
+        store_web_message(session_id, "assistant", reply)
+    except Exception:
+        pass
 
     resp = web.json_response({"reply": reply})
     resp.headers["Access-Control-Allow-Origin"] = "*"
