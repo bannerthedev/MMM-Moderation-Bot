@@ -2506,13 +2506,17 @@ async def tickets_create_handler(request: web.Request):
     """
     POST /tickets/create
     body: { session_id, user_name, user_id (optional), reason, transcript }
-    Does NOT create a ticket channel.
-    DMs only the TICKET_STAFF_ROLE_ID members with a short summary.
+    Best-effort:
+      - DM members of TICKET_STAFF_ROLE_ID with a summary
+      - Optionally DM the user
+    Frontend: always gets {"success": true} so it doesn't scare users
     """
     try:
         data = await request.json()
     except Exception:
-        resp = web.json_response({"success": False, "error": "invalid_json"})
+        # Still return success so website doesn't show an error, but log it
+        print("tickets_create_handler: invalid_json")
+        resp = web.json_response({"success": True, "note": "invalid_json"})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
@@ -2524,11 +2528,13 @@ async def tickets_create_handler(request: web.Request):
 
     guild = bot.get_guild(MAIN_GUILD_ID)
     if guild is None:
-        resp = web.json_response({"success": False, "error": "guild_not_found"})
+        # Bot not in guild / not ready – log but do NOT fail the website
+        print("tickets_create_handler: guild_not_found for MAIN_GUILD_ID =", MAIN_GUILD_ID)
+        resp = web.json_response({"success": True, "note": "guild_not_found"})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
-    # Extract last user line from transcript if present
+    # Extract last user line from transcript if present (for staff summary)
     last_line = ""
     if transcript:
         lines = [ln for ln in transcript.splitlines() if ln.strip()]
@@ -2546,7 +2552,7 @@ async def tickets_create_handler(request: web.Request):
         dm_lines.append(f"Last user message: {last_line}")
     dm_text = "\n".join(dm_lines)
 
-    # DM only members of the specific staff role
+    # DM only members of the specific staff role (best-effort)
     try:
         role = guild.get_role(TICKET_STAFF_ROLE_ID)
         if role:
@@ -2557,10 +2563,12 @@ async def tickets_create_handler(request: web.Request):
                     await member.send(dm_text)
                 except Exception:
                     continue
-    except Exception:
-        pass
+        else:
+            print("tickets_create_handler: TICKET_STAFF_ROLE_ID not found in guild")
+    except Exception as e:
+        print("tickets_create_handler: error DMing staff:", e)
 
-    # Optionally DM the user
+    # Optionally DM the user (if a Discord ID is known)
     if user_id:
         try:
             uid = int(user_id)
@@ -2576,9 +2584,10 @@ async def tickets_create_handler(request: web.Request):
                     )
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            print("tickets_create_handler: error DMing user:", e)
 
+    # Always report success=true to the website so it doesn't show an error
     resp = web.json_response({"success": True, "ticket_id": None})
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
