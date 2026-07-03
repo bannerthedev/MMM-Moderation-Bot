@@ -167,12 +167,11 @@ async def web_messages_handler(request: web.Request):
 async def start_web_api():
     app = web.Application()
 
-    # main endpoints
     app.router.add_post("/ai/reply", ai_reply_handler)
     app.router.add_post("/tickets/create", tickets_create_handler)
     app.router.add_get("/tickets/messages", web_messages_handler)
 
-    # simple CORS preflight (optional but nice)
+    # CORS preflight
     async def options_handler(request: web.Request):
         resp = web.Response(status=204)
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -2440,30 +2439,33 @@ async def temp_ban_watcher():
 async def ai_reply_handler(request: web.Request):
     """POST /ai/reply
     body: { session_id, message, topic }
-    returns: { reply: "..." }
+    returns: { reply: "..." }  (always 200 so frontend never hits catch)
     """
     try:
         data = await request.json()
         session_id = data.get("session_id") or "unknown"
         user_msg = data.get("message", "") or ""
         topic = data.get("topic", "general")
-    except Exception:
-        resp = web.json_response({"reply": "Invalid request"}, status=400)
+    except Exception as e:
+        print("ai_reply_handler invalid_json:", e)
+        # still return a reply so website doesn't show error
+        resp = web.json_response({"reply": "MMM Assistant: invalid request from website."})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
     # store user message in web ticket history
     try:
         store_web_message(session_id, "user", user_msg)
-    except Exception:
-        pass
+    except Exception as e:
+        print("store_web_message user error:", e)
 
+    # If no OpenAI configured, simple fallback reply
     if not OPENAI_API_KEY:
-        reply = "MMM Assistant here. AI not configured."
+        reply = "MMM Assistant here. AI is not fully configured yet, but staff can still see your messages."
         try:
             store_web_message(session_id, "assistant", reply)
-        except Exception:
-            pass
+        except Exception as e:
+            print("store_web_message assistant error:", e)
         resp = web.json_response({"reply": reply})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
@@ -2489,11 +2491,11 @@ async def ai_reply_handler(request: web.Request):
         print("AI reply error:", e)
         reply = "MMM Assistant: I had trouble generating a response right now. Please try again later."
 
-    # store assistant reply in history
+    # store assistant reply
     try:
         store_web_message(session_id, "assistant", reply)
-    except Exception:
-        pass
+    except Exception as e:
+        print("store_web_message assistant error:", e)
 
     resp = web.json_response({"reply": reply})
     resp.headers["Access-Control-Allow-Origin"] = "*"
