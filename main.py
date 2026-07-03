@@ -135,6 +135,67 @@ async def generate_ticket_ai_reply(message: discord.Message) -> str:
     return "MMM Assistant: I had trouble generating a response right now. Please try again or ask staff."
 
 
+
+# ---------- Minimal HTTP API (ai reply + ticket create + message poll) ----------
+
+async def web_messages_handler(request: web.Request):
+    """
+    GET /tickets/messages?session_id=...&since=N
+    Returns:
+      {
+        "messages": [ {from, text, ts}, ... ],
+        "next_index": int
+      }
+    """
+    session_id = request.query.get("session_id")
+    if not session_id:
+        resp = web.json_response({"messages": [], "next_index": 0})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+
+    try:
+        since = int(request.query.get("since", "0"))
+    except ValueError:
+        since = 0
+
+    msgs, new_idx = get_messages_since(session_id, since)
+    resp = web.json_response({"messages": msgs, "next_index": new_idx})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+async def start_web_api():
+    app = web.Application()
+
+    # main endpoints
+    app.router.add_post("/ai/reply", ai_reply_handler)
+    app.router.add_post("/tickets/create", tickets_create_handler)
+    app.router.add_get("/tickets/messages", web_messages_handler)
+
+    # simple CORS preflight (optional but nice)
+    async def options_handler(request: web.Request):
+        resp = web.Response(status=204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type,X-API-Key"
+        return resp
+
+    app.router.add_route("OPTIONS", "/ai/reply", options_handler)
+    app.router.add_route("OPTIONS", "/tickets/create", options_handler)
+    app.router.add_route("OPTIONS", "/tickets/messages", options_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web API running on 0.0.0.0:{port} "
+          f"(/ai/reply, /tickets/create, /tickets/messages)")
+
+
+
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -2143,6 +2204,40 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
             f"Your appeal has been submitted to the appeal team.\nYou are currently **position {position}** in the appeal queue.",
             ephemeral=True
         )
+
+
+
+@bot.tree.command(
+    name="webreply",
+    description="Reply to a website ticket session (DM staff -> website).",
+)
+@app_commands.describe(
+    session_id="Session ID shown in the web ticket DM (e.g. s_abcd1234)",
+    message="Message to send back to the website chat",
+)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def webreply(
+    interaction: discord.Interaction,
+    session_id: str,
+    message: str,
+):
+    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
+        await interaction.response.send_message("Use this in the main server.", ephemeral=True)
+        return
+
+    if not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message("You must be a moderator or admin.", ephemeral=True)
+        return
+
+    # store as 'staff' message in the web ticket log
+    store_web_message(session_id, "staff", message)
+
+    await interaction.response.send_message(
+        f"Sent reply to web session `{session_id}`.",
+        ephemeral=True,
+    )
+
+
 
 
 @bot.tree.command(name="appeal", description="Submit a ban appeal")
