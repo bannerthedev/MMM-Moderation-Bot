@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from openai import AsyncOpenAI  # <-- new
+# session_id -> list of {from, text, ts}
+WEB_TICKETS: dict[str, list[dict]] = {}
 
 load_dotenv()
 
@@ -80,6 +82,20 @@ intents.message_content = True  # enable in Developer Portal as well
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- Shared helpers ----------
+
+
+def store_web_message(session_id: str, who: str, text: str):
+    lst = WEB_TICKETS.setdefault(session_id, [])
+    lst.append({"from": who, "text": text, "ts": datetime.utcnow().isoformat()})
+
+def get_messages_since(session_id: str, last_index: int) -> tuple[list[dict], int]:
+    msgs = WEB_TICKETS.get(session_id, [])
+    if last_index < 0 or last_index > len(msgs):
+        last_index = 0
+    return msgs[last_index:], len(msgs)
+
+
+
 
 async def generate_ticket_ai_reply(message: discord.Message) -> str:
     if not OPENAI_API_KEY:
