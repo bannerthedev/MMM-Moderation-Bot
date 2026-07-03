@@ -164,21 +164,24 @@ async def web_messages_handler(request: web.Request):
     return resp
 
 
+async def options_handler(request: web.Request):
+    """Generic CORS preflight handler for our endpoints."""
+    resp = web.Response(status=204)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,X-API-Key"
+    return resp
+
+
 async def start_web_api():
     app = web.Application()
 
+    # main endpoints
     app.router.add_post("/ai/reply", ai_reply_handler)
     app.router.add_post("/tickets/create", tickets_create_handler)
     app.router.add_get("/tickets/messages", web_messages_handler)
 
-    # CORS preflight
-    async def options_handler(request: web.Request):
-        resp = web.Response(status=204)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type,X-API-Key"
-        return resp
-
+    # CORS preflight for each
     app.router.add_route("OPTIONS", "/ai/reply", options_handler)
     app.router.add_route("OPTIONS", "/tickets/create", options_handler)
     app.router.add_route("OPTIONS", "/tickets/messages", options_handler)
@@ -190,7 +193,6 @@ async def start_web_api():
     await site.start()
     print(f"Web API running on 0.0.0.0:{port} "
           f"(/ai/reply, /tickets/create, /tickets/messages)")
-
 
 
 
