@@ -139,14 +139,6 @@ async def generate_ticket_ai_reply(message: discord.Message) -> str:
 # ---------- Minimal HTTP API (ai reply + ticket create + message poll) ----------
 
 async def web_messages_handler(request: web.Request):
-    """
-    GET /tickets/messages?session_id=...&since=N
-    Returns:
-      {
-        "messages": [ {from, text, ts}, ... ],
-        "next_index": int
-      }
-    """
     session_id = request.query.get("session_id")
     if not session_id:
         resp = web.json_response({"messages": [], "next_index": 0})
@@ -165,7 +157,6 @@ async def web_messages_handler(request: web.Request):
 
 
 async def options_handler(request: web.Request):
-    """Generic CORS preflight handler for our endpoints."""
     resp = web.Response(status=204)
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
@@ -176,12 +167,10 @@ async def options_handler(request: web.Request):
 async def start_web_api():
     app = web.Application()
 
-    # main endpoints
     app.router.add_post("/ai/reply", ai_reply_handler)
     app.router.add_post("/tickets/create", tickets_create_handler)
     app.router.add_get("/tickets/messages", web_messages_handler)
 
-    # CORS preflight for each
     app.router.add_route("OPTIONS", "/ai/reply", options_handler)
     app.router.add_route("OPTIONS", "/tickets/create", options_handler)
     app.router.add_route("OPTIONS", "/tickets/messages", options_handler)
@@ -193,7 +182,6 @@ async def start_web_api():
     await site.start()
     print(f"Web API running on 0.0.0.0:{port} "
           f"(/ai/reply, /tickets/create, /tickets/messages)")
-
 
 
 
