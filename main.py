@@ -2335,11 +2335,14 @@ async def ai_reply_handler(request: web.Request):
         user_msg = data.get("message", "")
         topic = data.get("topic", "general")
     except Exception:
-        return web.json_response({"reply": "Invalid request"}, status=400)
+        resp = web.json_response({"reply": "Invalid request"}, status=400)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
-    # Use the same logic you use in generate_ticket_ai_reply but simplified:
     if not OPENAI_API_KEY:
-        return web.json_response({"reply": "MMM Assistant here. AI not configured."})
+        resp = web.json_response({"reply": "MMM Assistant here. AI not configured."})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
     system_prompt = (
         "You are MMM Assistant, a helpful support agent inside a Discord ticket system. "
@@ -2348,7 +2351,7 @@ async def ai_reply_handler(request: web.Request):
     )
 
     try:
-        resp = await openai_client.chat.completions.create(
+        resp_openai = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -2357,29 +2360,37 @@ async def ai_reply_handler(request: web.Request):
             temperature=0.4,
             max_tokens=400,
         )
-        reply = resp.choices[0].message.content.strip()
+        reply = resp_openai.choices[0].message.content.strip()
     except Exception as e:
         print("AI reply error:", e)
         reply = "MMM Assistant: I had trouble generating a response right now. Please try again later."
 
-    return web.json_response({"reply": reply})
+    resp = web.json_response({"reply": reply})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
+
+TICKET_STAFF_ROLE_ID = 1519239086144098314  # web-ticket staff role
 
 async def tickets_create_handler(request: web.Request):
     """
     POST /tickets/create
     body: { session_id, user_name, user_id (optional), reason, transcript }
-    Creates a DM-style ticket channel in main guild (root, visible only to staff) and returns { success, ticket_id }.
+    Does NOT create a ticket channel.
+    DMs only the TICKET_STAFF_ROLE_ID members with a short summary.
     """
     try:
         data = await request.json()
     except Exception:
-        return web.json_response({"success": False, "error": "invalid_json"}, status=400)
+        resp = web.json_response({"success": False, "error": "invalid_json"})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
+    session_id = data.get("session_id") or "unknown"
+    user_name = (data.get("user_name") or "WebsiteUser").strip()[:50]
     user_id = data.get("user_id")
-    user_name = (data.get("user_name") or "webuser").strip()[:50]
-    reason = data.get("reason", "No reason provided.")
-    transcript = data.get("transcript", "")
+    reason = data.get("reason") or "No reason provided."
+    transcript = data.get("transcript") or ""
 
     guild = bot.get_guild(MAIN_GUILD_ID)
     if guild is None:
@@ -2387,117 +2398,29 @@ async def tickets_create_handler(request: web.Request):
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
 
-    # Build a safe short channel name
-    safe_name = "".join(c for c in user_name.lower() if c.isalnum() or c in ("-", "_")).strip()[:20] or "web"
-    chan_name = f"dm-{safe_name}-{int(datetime.utcnow().timestamp()) % 10000}"
+    # Extract last user line from transcript if present
+    last_line = ""
+    if transcript:
+        lines = [ln for ln in transcript.splitlines() if ln.strip()]
+        if lines:
+            last_line = lines[-1].strip()
 
-    # Permission overwrites: hide from @everyone, allow only staff roles and the bot
-    overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+    dm_lines = [
+        "**New web ticket request**",
+        f"Session: `{session_id}`",
+        f"User: {user_name}" + (f" (ID: {user_id})" if user_id else ""),
+        f"Reason: {reason}",
+    ]
+    if last_line:
+        dm_lines.append("")
+        dm_lines.append(f"Last user message: {last_line}")
+    dm_text = "\n".join(dm_lines)
 
-    staff_role_ids = [STAFF_PING_ROLE_ID_MAIN, MOD_ROLE_ID, TRIAL_MOD_ROLE_ID]
-    for rid in dict.fromkeys(staff_role_ids):
-        if not rid:
-            continue
-        r = guild.get_role(rid)
-        if r:
-            overwrites[r] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-            )
-
-    bot_member = guild.me or guild.get_member(bot.user.id)
-    if bot_member:
-        overwrites[bot_member] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            manage_channels=True,
-            read_message_history=True,
-        )
-
-    # Create the staff-only channel at root (no category)
+    # DM only members of the specific staff role
     try:
-        ch = await guild.create_text_channel(
-            name=chan_name,
-            overwrites=overwrites,
-            reason=f"Web DM ticket for {user_name}",
-        )
-    except Exception as e:
-        print("Failed to create DM ticket channel:", e)
-        resp = web.json_response({"success": False, "error": "create_channel_failed"})
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
-
-    # Map user_id -> channel if provided
-    if user_id:
-        try:
-            uid = int(user_id)
-            DM_TICKET_CHANNELS[uid] = ch.id
-        except Exception:
-            pass
-
-    # Compose initial staff message (include transcript if present)
-    try:
-        staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
-        staff_ping = staff_role.mention if staff_role else ""
-        intro_lines = [
-            f"**New web DM-ticket**",
-            f"**User:** {user_name}" + (f" (ID: {user_id})" if user_id else ""),
-            f"**Reason:** {reason}",
-        ]
-        intro = "\n".join(intro_lines)
-        await ch.send(f"{staff_ping}\n{intro}")
-        if transcript:
-            trimmed = transcript[:1900]
-            await ch.send(f"**Transcript (truncated):**\n{trimmed}")
-        # Optional: attach staff-side view with Ask AI / Close buttons
-        try:
-            owner_id = int(user_id) if user_id else 0
-            await ch.send("Staff tools:", view=DMTicketChannelView(owner_id=owner_id))
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    # DM the user with a note telling them staff will be in touch (only if we know user_id)
-    if user_id:
-        try:
-            uid = int(user_id)
-            try:
-                user_obj = await bot.fetch_user(uid)
-            except Exception:
-                user_obj = bot.get_user(uid)
-            if user_obj:
-                dm_lines = [
-                    f"Hello {user_name},",
-                    "Your support request has been received by MMM Staff.",
-                    "Staff will respond in a private ticket on the server.",
-                    "If you want to send more info, reply here and staff will see it.",
-                ]
-                try:
-                    await user_obj.send("\n".join(dm_lines))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # DM all ticket staff with summary
-    try:
-        staff_role = guild.get_role(STAFF_PING_ROLE_ID_MAIN)
-        if staff_role:
-            dm_text_lines = [
-                "**New web ticket opened**",
-                f"Channel: {ch.mention}",
-                f"User: {user_name}" + (f" (ID: {user_id})" if user_id else ""),
-                f"Reason: {reason}",
-            ]
-            if transcript:
-                dm_text_lines.append("")
-                dm_text_lines.append("Transcript (truncated):")
-                dm_text_lines.append((transcript[:1500]) or "[no text]")
-            dm_text = "\n".join(dm_text_lines)
-
-            for member in staff_role.members:
+        role = guild.get_role(TICKET_STAFF_ROLE_ID)
+        if role:
+            for member in role.members:
                 if member.bot:
                     continue
                 try:
@@ -2507,9 +2430,29 @@ async def tickets_create_handler(request: web.Request):
     except Exception:
         pass
 
-    resp = web.json_response({"success": True, "ticket_id": str(ch.id)})
+    # Optionally DM the user
+    if user_id:
+        try:
+            uid = int(user_id)
+            try:
+                user_obj = await bot.fetch_user(uid)
+            except Exception:
+                user_obj = bot.get_user(uid)
+            if user_obj:
+                try:
+                    await user_obj.send(
+                        "MMM Assistant has sent your request to staff. "
+                        "Staff will contact you on Discord."
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    resp = web.json_response({"success": True, "ticket_id": None})
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
+
 
 
 
