@@ -42,7 +42,7 @@ LOG_CHANNEL_ID = 1408472513108770816
 # Channel for deleted-message logs (in main server)
 DELETE_LOG_CHANNEL_ID = 1408474605844172910
 
-MAIN_SERVER_INVITE = "https://discord.gg/mmml"
+MAIN_SERVER_INVITE = "https://discord.gg/GSSpFgECg2"
 SERVER_NAME = "Monke Monke Monke League"
 APPEAL_LINK = "https://discord.gg/Dn9N2GdGVT"  # for ban DM
 
