@@ -393,11 +393,12 @@ BAN_DURATION_DAYS = 60
 #                       /submit-report
 # ============================================================
 
-class SRDurationReasonModal(discord.ui.Modal, title="Action (duration + reason)"):
+class SRDurationReasonModal(discord.ui.Modal, title="Action: Duration + Reason"):
     duration = discord.ui.TextInput(
         label="Duration (e.g. 7d, 12h, 30m, perm)",
         required=True,
-        max_length=20,
+        max_length=50,
+        placeholder="Use 'perm' for permanent bans. Mute must be finite.",
     )
     reason = discord.ui.TextInput(
         label="Reason",
@@ -412,164 +413,116 @@ class SRDurationReasonModal(discord.ui.Modal, title="Action (duration + reason)"
         self.target = target
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Basic checks
+        # ensure in main guild
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message(
-                "This command can only be used in the main server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
             return
 
+        # permission check
         if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-            await interaction.response.send_message(
-                "You must be a moderator or admin to use this command.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("You must be a moderator or admin to perform this action.", ephemeral=True)
             return
 
         raw_duration = self.duration.value.strip()
-        td = parse_duration(raw_duration)  # None => permanent
         reason = self.reason.value.strip() or "No reason provided."
+        td = parse_duration(raw_duration)  # None => permanent in our parser
 
-        # ---------------- BAN ----------------
+        # BAN flow
         if self.action == "ban":
-            guild = interaction.guild
-            try:
-                await guild.ban(
-                    discord.Object(id=self.target.id),
-                    reason=reason,
-                    delete_message_seconds=0,
-                )
-            except Exception as e:
-                await interaction.response.send_message(
-                    f"Failed to ban user: `{e}`",
-                    ephemeral=True,
-                )
+            # only admins can ban (double-check)
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("Only administrators may perform bans.", ephemeral=True)
                 return
 
-            # DM user (best effort)
+            try:
+                await interaction.guild.ban(discord.Object(id=self.target.id), reason=reason, delete_message_seconds=0)
+            except Exception as e:
+                await interaction.response.send_message(f"Failed to ban user: `{e}`", ephemeral=True)
+                return
+
+            # DM user (best-effort)
             try:
                 dm_embed = discord.Embed(
                     title=f"You have been banned from {SERVER_NAME}",
-                    description=(
-                        f"**Reason:** {reason}\n\n"
-                        f"If you believe this was in error, you may appeal here:\n{APPEAL_LINK}"
-                    ),
+                    description=f"**Reason:** {reason}\n**Duration:** {'Permanent' if td is None else raw_duration}\n\nAppeal: {APPEAL_LINK}",
                     color=discord.Color.dark_red(),
                 )
                 await self.target.send(embed=dm_embed)
             except Exception:
                 pass
 
-            # Log to mod log channel
+            # Log
             log_ch = get_log_channel()
-            if log_ch is not None:
+            if log_ch:
                 case_id = get_next_case_id()
                 now = now_utc()
                 offender_str = f"{self.target.id} {getattr(self.target, 'mention', '')}"
-                dur_text = "Permanent" if td is None else raw_duration
-                embed = discord.Embed(
-                    title=f"ban | case {case_id}",
-                    color=discord.Color.dark_red(),
-                )
+                embed = discord.Embed(title=f"ban | case {case_id}", color=discord.Color.dark_red())
                 embed.add_field(name="Offender:", value=offender_str, inline=False)
                 embed.add_field(name="Reason:", value=reason, inline=False)
-                embed.add_field(name="Duration:", value=dur_text, inline=False)
-                embed.add_field(
-                    name="ID / Time:",
-                    value=f"{self.target.id} • {format_time(now)}",
-                    inline=False,
-                )
+                embed.add_field(name="Duration:", value=("Permanent" if td is None else raw_duration), inline=False)
+                embed.add_field(name="ID / Time:", value=f"{self.target.id} • {format_time(now)}", inline=False)
                 try:
                     await log_ch.send(embed=embed)
                 except Exception:
                     pass
 
-            await interaction.response.send_message(
-                f"✅ Banned {self.target.mention} (`{self.target.id}`)\n**Reason:** {reason}",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"✅ Banned {self.target.mention} (`{self.target.id}`)\n**Reason:** {reason}", ephemeral=True)
             return
 
-        # ---------------- MUTE / TIMEOUT ----------------
-        elif self.action == "mute":
+        # MUTE / TIMEOUT flow
+        if self.action == "mute":
+            # require a finite duration
             if td is None:
-                await interaction.response.send_message(
-                    "Mute must have a finite duration (no permanent mutes via this form).",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("Mute requires a finite duration (e.g., 30m, 12h, 7d).", ephemeral=True)
                 return
 
-            guild = interaction.guild
-            member = guild.get_member(self.target.id)
+            member = interaction.guild.get_member(self.target.id)
             if member is None:
-                await interaction.response.send_message(
-                    "That user is not in the server.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("User is not in the server.", ephemeral=True)
                 return
 
             end_time = now_utc() + td
             try:
                 await member.edit(timeout=end_time, reason=reason)
             except Exception as e:
-                await interaction.response.send_message(
-                    f"Failed to timeout user: `{e}`",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message(f"Failed to timeout user: `{e}`", ephemeral=True)
                 return
 
-            # DM user (best effort)
+            # DM user (best-effort)
             try:
                 dm_embed = discord.Embed(
                     title=f"You have been muted in {SERVER_NAME}",
-                    description=(
-                        f"**Duration:** {raw_duration}\n"
-                        f"**Reason:** {reason}"
-                    ),
+                    description=f"**Duration:** {raw_duration}\n**Reason:** {reason}",
                     color=discord.Color.orange(),
                 )
                 await member.send(embed=dm_embed)
             except Exception:
                 pass
 
-            # Log to mod log channel
+            # Log
             log_ch = get_log_channel()
-            if log_ch is not None:
+            if log_ch:
                 case_id = get_next_case_id()
                 now = now_utc()
                 offender_str = f"{member.id} {member.mention}"
-                embed = discord.Embed(
-                    title=f"mute | case {case_id}",
-                    color=discord.Color.orange(),
-                )
+                embed = discord.Embed(title=f"mute | case {case_id}", color=discord.Color.orange())
                 embed.add_field(name="Offender:", value=offender_str, inline=False)
                 embed.add_field(name="Reason:", value=reason, inline=False)
                 embed.add_field(name="Duration:", value=raw_duration, inline=False)
-                embed.add_field(
-                    name="ID / Time:",
-                    value=f"{member.id} • {format_time(now)}",
-                    inline=False,
-                )
+                embed.add_field(name="ID / Time:", value=f"{member.id} • {format_time(now)}", inline=False)
                 try:
                     await log_ch.send(embed=embed)
                 except Exception:
                     pass
 
-            await interaction.response.send_message(
-                f"✅ Muted {member.mention} (`{member.id}`) for `{raw_duration}`\n**Reason:** {reason}",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"✅ Muted {member.mention} (`{member.id}`) for `{raw_duration}`\n**Reason:** {reason}", ephemeral=True)
             return
 
-        # Fallback
-        await interaction.response.send_message(
-            "Unknown action.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Unknown action.", ephemeral=True)
 
 
-class SRReasonOnlyModal(discord.ui.Modal, title="Action (reason only)"):
+class SRReasonOnlyModal(discord.ui.Modal, title="Action: Reason"):
     reason = discord.ui.TextInput(
         label="Reason",
         style=discord.TextStyle.paragraph,
@@ -584,88 +537,63 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Action (reason only)"):
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message(
-                "This command can only be used in the main server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("This must be used in the main server.", ephemeral=True)
             return
 
         if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-            await interaction.response.send_message(
-                "You must be a moderator or admin to use this command.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("You must be a moderator or admin to use this.", ephemeral=True)
             return
 
         reason = self.reason.value.strip() or "No reason provided."
 
-        # Only "warning" currently uses this modal
-        if self.action != "warning":
-            await interaction.response.send_message(
-                "Unknown action.",
-                ephemeral=True,
-            )
-            return
-
-        # DM user warning (best effort)
-        try:
-            dm_embed = discord.Embed(
-                title=f"You have received a warning in {SERVER_NAME}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.yellow(),
-            )
-            await self.target.send(embed=dm_embed)
-        except Exception:
-            pass
-
-        # Log warning
-        log_ch = get_log_channel()
-        if log_ch is not None:
-            case_id = get_next_case_id()
-            now = now_utc()
-            offender_str = f"{self.target.id} {getattr(self.target, 'mention', '')}"
-            embed = discord.Embed(
-                title=f"warning | case {case_id}",
-                color=discord.Color.yellow(),
-            )
-            embed.add_field(name="Offender:", value=offender_str, inline=False)
-            embed.add_field(name="Reason:", value=reason, inline=False)
-            embed.add_field(
-                name="ID / Time:",
-                value=f"{self.target.id} • {format_time(now)}",
-                inline=False,
-            )
+        if self.action == "warning":
+            # DM user (best-effort)
             try:
-                await log_ch.send(embed=embed)
+                dm_embed = discord.Embed(
+                    title=f"You have received a warning in {SERVER_NAME}",
+                    description=f"**Reason:** {reason}",
+                    color=discord.Color.yellow(),
+                )
+                await self.target.send(embed=dm_embed)
             except Exception:
                 pass
 
-        await interaction.response.send_message(
-            f"✅ Warning recorded for {self.target.mention} (`{self.target.id}`)\n**Reason:** {reason}",
-            ephemeral=True,
-        )
+            # Log
+            log_ch = get_log_channel()
+            if log_ch:
+                case_id = get_next_case_id()
+                now = now_utc()
+                offender_str = f"{self.target.id} {getattr(self.target, 'mention', '')}"
+                embed = discord.Embed(title=f"warning | case {case_id}", color=discord.Color.yellow())
+                embed.add_field(name="Offender:", value=offender_str, inline=False)
+                embed.add_field(name="Reason:", value=reason, inline=False)
+                embed.add_field(name="ID / Time:", value=f"{self.target.id} • {format_time(now)}", inline=False)
+                try:
+                    await log_ch.send(embed=embed)
+                except Exception:
+                    pass
+
+            await interaction.response.send_message(f"✅ Warning recorded for {self.target.mention} (`{self.target.id}`)\n**Reason:** {reason}", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Unknown action.", ephemeral=True)
 
 
 class SRMemberSelect(discord.ui.UserSelect):
     def __init__(self, action: str):
-        super().__init__(
-            placeholder="Select a member...",
-            min_values=1,
-            max_values=1,
-            custom_id="sr_member_select",
-        )
-        self.action = action  # "ban" / "mute" / "warning"
+        super().__init__(placeholder="Select a member...", min_values=1, max_values=1, custom_id="sr_member_select")
+        self.action = action
 
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
-        action = self.action
-
-        if action in ("ban", "mute"):
-            modal = SRDurationReasonModal(action=action, target=member)
+        if self.action in ("ban", "mute"):
+            modal = SRDurationReasonModal(action=self.action, target=member)
+            await interaction.response.send_modal(modal)
+        elif self.action == "warning":
+            modal = SRReasonOnlyModal(action="warning", target=member)
+            await interaction.response.send_modal(modal)
         else:
-            modal = SRReasonOnlyModal(action=action, target=member)
-
-        await interaction.response.send_modal(modal)
+            await interaction.response.send_message("Unknown action.", ephemeral=True)
 
 
 class SRMemberSelectView(discord.ui.View):
@@ -677,56 +605,26 @@ class SRMemberSelectView(discord.ui.View):
 class SRActionSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Ban", value="ban"),
-            discord.SelectOption(label="Warning", value="warning"),
-            discord.SelectOption(label="Mute/Timeout", value="mute"),
+            discord.SelectOption(label="Ban", value="ban", description="Ban a user (admins only)"),
+            discord.SelectOption(label="Warning", value="warning", description="Issue a warning (mod+)"),
+            discord.SelectOption(label="Mute/Timeout", value="mute", description="Timeout/mute a user (mod+)"),
         ]
-        super().__init__(
-            placeholder="Choose an action...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="sr_action_select",
-        )
+        super().__init__(placeholder="Choose an action...", min_values=1, max_values=1, options=options, custom_id="sr_action_select")
 
     async def callback(self, interaction: discord.Interaction):
         action = self.values[0]
+        # if action is ban ensure only admins proceed
+        if action == "ban" and (not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("Only administrators may perform bans.", ephemeral=True)
+            return
         view = SRMemberSelectView(action)
-        await interaction.response.edit_message(
-            content=f"Action selected: **{action.capitalize()}**. Now choose a member:",
-            view=view,
-        )
+        await interaction.response.edit_message(content=f"Action selected: **{action.capitalize()}** — now select a member.", view=view)
 
 
 class SRActionSelectView(discord.ui.View):
     def __init__(self, timeout: Optional[float] = 120):
         super().__init__(timeout=timeout)
         self.add_item(SRActionSelect())
-
-
-@bot.tree.command(name="submit-report", description="Submit a moderation report (mods+ only)")
-@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
-async def submit_report(interaction: discord.Interaction):
-    if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-        await interaction.response.send_message(
-            "This command can only be used in the main server.",
-            ephemeral=True,
-        )
-        return
-
-    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
-        await interaction.response.send_message(
-            "You must be a moderator or admin to use this command.",
-            ephemeral=True,
-        )
-        return
-
-    view = SRActionSelectView()
-    await interaction.response.send_message(
-        "Choose an action for this report:",
-        view=view,
-        ephemeral=True,
-    )
 
 
 
